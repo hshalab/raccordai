@@ -36,7 +36,13 @@ export function registerMediaProtocolPrivileges(): void {
   ])
 }
 
-function resolveMediaPath(url: URL): string | null {
+interface ResolvedMedia {
+  path: string
+  /** Explicit Content-Type when the DB knows better than the file extension. */
+  mime: string | null
+}
+
+function resolveMedia(url: URL): ResolvedMedia | null {
   // For media://asset/<id>, URL parses host="asset" and pathname="/<id>".
   const kind = url.host
   const segments = url.pathname.split('/').filter(Boolean)
@@ -45,17 +51,26 @@ function resolveMediaPath(url: URL): string | null {
 
   if (kind === 'asset') {
     const row = getDb().select().from(assets).where(eq(assets.id, id)).get()
-    return row?.filePath ?? null
+    return row?.filePath ? { path: row.filePath, mime: null } : null
   }
   if (kind === 'generation') {
     const row = getDb().select().from(generations).where(eq(generations.id, id)).get()
     if (!row) return null
-    return (segments[1] === 'lastFrame' ? row.lastFramePath : row.resultPath) ?? null
+    if (segments[1] === 'lastFrame') {
+      return row.lastFramePath ? { path: row.lastFramePath, mime: null } : null
+    }
+    if (!row.resultPath) return null
+    // Prefer the mime recorded at download time: the extension can be .bin
+    // when kie's Content-Type header was missing/unknown, and Chromium will
+    // not decode a <video> served as application/octet-stream.
+    const mime = /^(video|audio|image)\//.test(row.resultMimeType ?? '') ? row.resultMimeType : null
+    return { path: row.resultPath, mime }
   }
   return null
 }
 
-function fileResponse(filePath: string, request: Request): Response {
+function fileResponse(media: ResolvedMedia, request: Request): Response {
+  const filePath = media.path
   let size: number
   try {
     size = statSync(filePath).size
@@ -64,7 +79,7 @@ function fileResponse(filePath: string, request: Request): Response {
   }
 
   const baseHeaders: Record<string, string> = {
-    'Content-Type': mimeTypeFor(filePath) ?? 'application/octet-stream',
+    'Content-Type': media.mime ?? mimeTypeFor(filePath) ?? 'application/octet-stream',
     'Accept-Ranges': 'bytes',
     // CORS headers so <canvas> reads (last-frame extraction) aren't tainted
     // and fetch() callers (FCPXML export) can read range metadata.
@@ -119,8 +134,8 @@ export function registerMediaProtocolHandler(): void {
         }
       })
     }
-    const filePath = resolveMediaPath(new URL(request.url))
-    if (!filePath) return new Response('not found', { status: 404 })
-    return fileResponse(filePath, request)
+    const media = resolveMedia(new URL(request.url))
+    if (!media) return new Response('not found', { status: 404 })
+    return fileResponse(media, request)
   })
 }

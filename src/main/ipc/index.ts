@@ -17,6 +17,7 @@ import * as generationsService from '../services/generations'
 import * as graph from '../services/graph'
 import * as library from '../services/library'
 import * as projects from '../services/projects'
+import { kieGetCredits } from '../services/kie'
 import * as runEngine from '../services/runEngine'
 import * as settingsService from '../services/settings'
 import * as videosService from '../services/videos'
@@ -179,6 +180,7 @@ export function registerIpcHandlers(): void {
   handle('projects:creditsUsage', ({ projectId }) =>
     generationsService.projectCreditsUsage(projectId)
   )
+  handle('kie:credits', async () => ({ credits: await kieGetCredits() }))
   handle('ai:refineImagePrompt', (input) => aiService.refineImagePrompt(input))
   handle('assets:promoteGeneration', async ({ generationId, name, description }) =>
     withAssetUrl(await assetsService.promoteGeneration(generationId, name, description))

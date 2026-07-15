@@ -358,6 +358,8 @@ function ApiKeyRow({
     onSuccess: () => {
       setKey('')
       void queryClient.invalidateQueries({ queryKey: ['settings'] })
+      // A fresh key makes the header balance fetchable (or changes account).
+      void queryClient.invalidateQueries({ queryKey: ['kie', 'credits'] })
     }
   })
 

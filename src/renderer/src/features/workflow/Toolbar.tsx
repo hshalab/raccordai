@@ -2,6 +2,7 @@ import { useReactFlow } from '@xyflow/react'
 import { Link } from '@tanstack/react-router'
 import {
   ArrowDownToLine,
+  ArrowLeft,
   ArrowRightToLine,
   ChevronDown,
   FileImage,
@@ -14,6 +15,7 @@ import {
   PanelBottom,
   PanelBottomClose,
   Palette,
+  PenTool,
   Plus,
   Redo2,
   Search,
@@ -25,7 +27,14 @@ import { useQuery } from '@tanstack/react-query'
 import { useTranslation } from 'react-i18next'
 import type { GraphEdge, GraphNode } from '@shared/ipc/contracts'
 import { MODELS, defaultParamsFor } from '@shared/models'
-import { STYLES } from '@shared/styles/registry'
+import { STYLES, getStyle } from '@shared/styles/registry'
+import {
+  DESIGN_RECIPES,
+  designIntent,
+  designNodeParams,
+  getDesignRecipe,
+  type DesignRecipe
+} from '@shared/designs/registry'
 import { invoke } from '@renderer/lib/ipc'
 import { useFlag } from '@renderer/features/flags/useFlags'
 import { Button } from '@renderer/components/ui/Button'
@@ -68,6 +77,7 @@ export function WorkflowToolbar({
   const video = useVideo(videoId).data
   const project = useProject(projectId).data
   const creativeTemplates = useFlag('creative-templates')
+  const designRecipes = useFlag('design-recipes')
   const { mutate: setStyle } = useIpcMutation('videos:setStyle', [['videos']])
 
   // Undo/redo — state is refreshed by the ['history'] invalidation that every
@@ -87,7 +97,7 @@ export function WorkflowToolbar({
     ['history']
   ])
 
-  async function addNode(modelId: string) {
+  function spawnPosition(): { x: number; y: number } {
     // Spawn the node at the centre of the CURRENT viewport (not at fixed canvas
     // coords, which end up off-screen once the user has panned/zoomed away).
     const pane = document.querySelector('.react-flow')?.getBoundingClientRect()
@@ -97,15 +107,39 @@ export function WorkflowToolbar({
     const centre = screenToFlowPosition(screenCentre)
     // Small cascade so consecutive adds don't stack exactly on top of each other.
     const cascade = (graph.nodes.length % 5) * 28
-    const position = {
+    return {
       x: Math.round(centre.x - 144 + cascade), // ~half a modelNode width
       y: Math.round(centre.y - 130 + cascade) // ~half a modelNode height
     }
+  }
+
+  async function addNode(modelId: string) {
     await createNode({
       videoId,
       modelId,
-      position,
+      position: spawnPosition(),
       params: modelId === 'studio/asset' ? {} : defaultParamsFor(modelId)
+    })
+  }
+
+  /**
+   * Design recipe → a pre-configured image node: prompt built for the target
+   * model and the video's current style, reference-only intent, marker in
+   * params so the editor can warn about frame-anchor connections.
+   */
+  async function addDesignNode(recipeId: string, description: string) {
+    const recipe = getDesignRecipe(recipeId)
+    if (!recipe) return
+    const style = video?.styleId ? getStyle(video.styleId) : undefined
+    const name = t(`designs.${recipeId}.name` as never) as string
+    const subject = description.trim()
+    await createNode({
+      videoId,
+      modelId: recipe.defaultModelId,
+      position: spawnPosition(),
+      params: designNodeParams(recipe, recipe.defaultModelId, { description: subject, style }),
+      label: subject ? `${name} — ${subject.slice(0, 40)}` : name,
+      intent: designIntent(recipe)
     })
   }
 
@@ -135,7 +169,7 @@ export function WorkflowToolbar({
       <div className="flex-1" />
 
       {/* Right: actions */}
-      <AddNodeMenu onAdd={addNode} />
+      <AddNodeMenu onAdd={addNode} onAddDesign={designRecipes ? addDesignNode : undefined} />
 
       {creativeTemplates && (
         <StyleMenu
@@ -252,16 +286,22 @@ export function WorkflowToolbar({
 interface AddEntry {
   id: string
   label: string
-  kind: 'image' | 'video' | 'audio' | 'asset'
+  /** Secondary line: what the entry does (localized for designs/asset, product data for models). */
+  desc: string
+  kind: 'design' | 'image' | 'video' | 'audio' | 'asset'
+  /** Set on design entries — choosing one opens the description step instead of adding. */
+  recipe?: DesignRecipe
 }
 
 const KIND_ICONS: Record<AddEntry['kind'], React.ReactNode> = {
+  design: <PenTool className="h-3.5 w-3.5 text-highlight" />,
   image: <FileImage className="h-3.5 w-3.5 text-accent-soft" />,
   video: <FileVideo className="h-3.5 w-3.5 text-accent" />,
   audio: <Music className="h-3.5 w-3.5 text-highlight-soft" />,
   asset: <FolderInput className="h-3.5 w-3.5 text-warning" />
 }
-const KIND_ORDER: AddEntry['kind'][] = ['image', 'video', 'audio', 'asset']
+// Designs first: the guided entries are the beginner-friendly starting point.
+const KIND_ORDER: AddEntry['kind'][] = ['design', 'image', 'video', 'audio', 'asset']
 
 /** Lowercase + strip accents so an accented query still matches "Seedance". */
 function normalize(s: string): string {
@@ -271,24 +311,60 @@ function normalize(s: string): string {
     .toLowerCase()
 }
 
-function AddNodeMenu({ onAdd }: { onAdd: (modelId: string) => void }) {
+function AddNodeMenu({
+  onAdd,
+  onAddDesign
+}: {
+  onAdd: (modelId: string) => void
+  /** Present only when the design-recipes flag is on. */
+  onAddDesign?: (recipeId: string, description: string) => void
+}) {
   const { t } = useTranslation()
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
   const [active, setActive] = useState(0)
+  /** Non-null while the second step (design subject description) is showing. */
+  const [pendingDesign, setPendingDesign] = useState<DesignRecipe | null>(null)
+  const [designDesc, setDesignDesc] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
+  const designInputRef = useRef<HTMLInputElement>(null)
+  // Mirror for the search input's onBlur timeout (the state value is stale there).
+  const pendingDesignRef = useRef<DesignRecipe | null>(null)
+  useEffect(() => {
+    pendingDesignRef.current = pendingDesign
+  }, [pendingDesign])
 
   const entries = useMemo<AddEntry[]>(
     () => [
-      ...MODELS.map((m) => ({ id: m.id, label: m.label, kind: m.kind as AddEntry['kind'] })),
-      { id: 'studio/asset', label: t('editor.assetEntry'), kind: 'asset' }
+      ...(onAddDesign
+        ? DESIGN_RECIPES.map((r) => ({
+            id: `design:${r.id}`,
+            label: t(`designs.${r.id}.name` as never) as string,
+            desc: t(`designs.${r.id}.desc` as never) as string,
+            kind: 'design' as const,
+            recipe: r
+          }))
+        : []),
+      // Model label/description are product data (English), like the ids — not localized.
+      ...MODELS.map((m) => ({
+        id: m.id,
+        label: m.label,
+        desc: `${m.description.split('.')[0]}.`,
+        kind: m.kind as AddEntry['kind']
+      })),
+      {
+        id: 'studio/asset',
+        label: t('editor.assetEntry'),
+        desc: t('editor.assetEntryDesc'),
+        kind: 'asset'
+      }
     ],
-    [t]
+    [t, onAddDesign]
   )
 
   const q = normalize(query.trim())
   const filtered = q
-    ? entries.filter((e) => normalize(`${e.label} ${e.id} ${e.kind}`).includes(q))
+    ? entries.filter((e) => normalize(`${e.label} ${e.desc} ${e.id} ${e.kind}`).includes(q))
     : entries
   const groups = KIND_ORDER.map((kind) => ({
     kind,
@@ -303,14 +379,36 @@ function AddNodeMenu({ onAdd }: { onAdd: (modelId: string) => void }) {
   }, [query])
 
   useEffect(() => {
-    if (open) inputRef.current?.focus()
-  }, [open])
+    if (open && !pendingDesign) inputRef.current?.focus()
+  }, [open, pendingDesign])
+
+  useEffect(() => {
+    if (pendingDesign) designInputRef.current?.focus()
+  }, [pendingDesign])
+
+  function close() {
+    setOpen(false)
+    setQuery('')
+    setPendingDesign(null)
+    setDesignDesc('')
+  }
 
   function choose(entry: AddEntry | undefined) {
     if (!entry) return
+    if (entry.recipe) {
+      // Second step: ask for the subject before building the prompt.
+      setPendingDesign(entry.recipe)
+      setDesignDesc('')
+      return
+    }
     onAdd(entry.id)
-    setOpen(false)
-    setQuery('')
+    close()
+  }
+
+  function confirmDesign() {
+    if (!pendingDesign) return
+    onAddDesign?.(pendingDesign.id, designDesc)
+    close()
   }
 
   function onKeyDown(e: React.KeyboardEvent) {
@@ -324,8 +422,7 @@ function AddNodeMenu({ onAdd }: { onAdd: (modelId: string) => void }) {
       e.preventDefault()
       choose(flat[active])
     } else if (e.key === 'Escape') {
-      setOpen(false)
-      setQuery('')
+      close()
     }
   }
 
@@ -340,53 +437,123 @@ function AddNodeMenu({ onAdd }: { onAdd: (modelId: string) => void }) {
         <Plus className="h-3.5 w-3.5" /> {t('editor.addNode')}
       </Button>
       {open && (
-        <div className="absolute left-0 z-20 mt-1 w-72 overflow-hidden rounded-md border border-neutral-800 bg-neutral-900 shadow-xl">
-          <div className="flex items-center gap-2 border-b border-neutral-800 px-2.5 py-2">
-            <Search className="h-3.5 w-3.5 flex-shrink-0 text-neutral-500" />
-            <input
-              ref={inputRef}
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={onKeyDown}
-              onBlur={() => setTimeout(() => setOpen(false), 150)}
-              placeholder={t('editor.filterPlaceholder')}
-              className="w-full bg-transparent text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none"
-            />
-          </div>
-          <div className="max-h-80 overflow-y-auto py-1">
-            {flat.length === 0 && (
-              <div className="px-3 py-2 text-xs italic text-neutral-500">
-                {t('editor.noModelMatch', { query })}
+        <div className="absolute left-0 z-20 mt-1 w-80 overflow-hidden rounded-md border border-neutral-800 bg-neutral-900 shadow-xl">
+          {pendingDesign ? (
+            <div className="p-2.5">
+              <div className="flex items-center gap-2">
+                <button
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    setPendingDesign(null)
+                  }}
+                  className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+                  title={t('editor.designBack')}
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" />
+                </button>
+                {KIND_ICONS.design}
+                <span className="text-sm font-medium text-neutral-100">
+                  {t(`designs.${pendingDesign.id}.name` as never)}
+                </span>
               </div>
-            )}
-            {groups.map((group) => (
-              <div key={group.kind}>
-                <div className="px-3 pb-0.5 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
-                  {t(`editor.kinds.${group.kind}`)}
-                </div>
-                {group.items.map((entry) => {
-                  const idx = flat.indexOf(entry)
-                  return (
-                    <button
-                      key={entry.id}
-                      onMouseDown={(e) => {
-                        e.preventDefault()
-                        choose(entry)
-                      }}
-                      onMouseEnter={() => setActive(idx)}
-                      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-neutral-200 ${
-                        idx === active ? 'bg-neutral-800' : ''
-                      }`}
-                    >
-                      {KIND_ICONS[entry.kind]}
-                      <span className="min-w-0 flex-1 truncate">{entry.label}</span>
-                      <span className="truncate text-[10px] text-neutral-600">{entry.id}</span>
-                    </button>
-                  )
-                })}
+              <p className="mt-1.5 text-[11px] leading-snug text-neutral-500">
+                {t('editor.designHint')}
+              </p>
+              <input
+                ref={designInputRef}
+                value={designDesc}
+                onChange={(e) => setDesignDesc(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    confirmDesign()
+                  } else if (e.key === 'Escape') {
+                    e.stopPropagation()
+                    setPendingDesign(null)
+                  }
+                }}
+                onBlur={() => setTimeout(close, 150)}
+                placeholder={t(`designs.${pendingDesign.id}.placeholder` as never)}
+                className="mt-2 w-full rounded-md border border-neutral-800 bg-neutral-950 px-2 py-1.5 text-sm text-neutral-100 placeholder:text-neutral-600 focus:border-accent focus:outline-none"
+              />
+              <div className="mt-2 flex justify-end">
+                <Button
+                  variant="primary"
+                  size="sm"
+                  onMouseDown={(e) => {
+                    e.preventDefault()
+                    confirmDesign()
+                  }}
+                >
+                  <Plus className="h-3.5 w-3.5" /> {t('editor.designAdd')}
+                </Button>
               </div>
-            ))}
-          </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-center gap-2 border-b border-neutral-800 px-2.5 py-2">
+                <Search className="h-3.5 w-3.5 flex-shrink-0 text-neutral-500" />
+                <input
+                  ref={inputRef}
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  onKeyDown={onKeyDown}
+                  onBlur={() =>
+                    setTimeout(() => {
+                      // Not when the blur is the hand-off to the design step input.
+                      if (!pendingDesignRef.current) close()
+                    }, 150)
+                  }
+                  placeholder={t('editor.filterPlaceholder')}
+                  className="w-full bg-transparent text-sm text-neutral-100 placeholder:text-neutral-600 focus:outline-none"
+                />
+              </div>
+              <div className="max-h-80 overflow-y-auto py-1">
+                {flat.length === 0 && (
+                  <div className="px-3 py-2 text-xs italic text-neutral-500">
+                    {t('editor.noModelMatch', { query })}
+                  </div>
+                )}
+                {groups.map((group, gi) => (
+                  <div
+                    key={group.kind}
+                    className={gi > 0 ? 'mt-1 border-t border-neutral-800/60 pt-1' : ''}
+                  >
+                    <div className="px-3 pb-1 pt-1.5 text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
+                      {t(`editor.kinds.${group.kind}`)}
+                    </div>
+                    {group.items.map((entry) => {
+                      const idx = flat.indexOf(entry)
+                      return (
+                        <button
+                          key={entry.id}
+                          onMouseDown={(e) => {
+                            e.preventDefault()
+                            choose(entry)
+                          }}
+                          onMouseEnter={() => setActive(idx)}
+                          title={entry.recipe ? undefined : entry.id}
+                          className={`flex w-full items-start gap-2.5 px-3 py-1.5 text-left ${
+                            idx === active ? 'bg-neutral-800' : ''
+                          }`}
+                        >
+                          <span className="mt-0.5 flex-shrink-0">{KIND_ICONS[entry.kind]}</span>
+                          <span className="min-w-0 flex-1">
+                            <span className="block truncate text-sm text-neutral-100">
+                              {entry.label}
+                            </span>
+                            <span className="block truncate text-[11px] leading-snug text-neutral-500">
+                              {entry.desc}
+                            </span>
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>

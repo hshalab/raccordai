@@ -291,6 +291,27 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
   const onConnect = useCallback(
     (connection: Connection) => {
       if (!connection.source || !connection.target || !connection.targetHandle) return
+      // Design sheets (character/décor/prop) are references: wired to a frame
+      // anchor they would literally appear on screen — warn before connecting.
+      const source = graph?.nodes.find((n) => n.id === connection.source)
+      const designId = (source?.params as { designId?: string } | null | undefined)?.designId
+      if (designId) {
+        const target = graph?.nodes.find((n) => n.id === connection.target)
+        const handle = target
+          ? getModel(target.modelId)?.inputs.find((h) => h.key === connection.targetHandle)
+          : undefined
+        if (
+          handle?.frameAnchor &&
+          !confirm(
+            t('editor.designFrameAnchorConfirm', {
+              label: source?.label ?? source?.key ?? '',
+              handle: connection.targetHandle
+            })
+          )
+        ) {
+          return
+        }
+      }
       connectEdge({
         videoId,
         sourceNodeId: connection.source,
@@ -299,7 +320,7 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
         targetHandle: connection.targetHandle
       })
     },
-    [connectEdge, videoId]
+    [connectEdge, videoId, graph, t]
   )
 
   // ── Recenter the canvas on a single node ────────────────────────────────

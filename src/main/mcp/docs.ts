@@ -1,6 +1,7 @@
 import { MODELS, getModel } from '@shared/models'
 import { STYLES, getStyle } from '@shared/styles/registry'
 import { WORKFLOW_TEMPLATES, getWorkflowTemplate } from '@shared/templates/registry'
+import { DESIGN_RECIPES, buildDesignPrompt, designIntent } from '@shared/designs/registry'
 
 /**
  * In-band, exploratory documentation for agents — served by the `docs` tool.
@@ -26,7 +27,9 @@ Typical session:
      REFERENCES (they guide without appearing) — docs "models" explains which is which
   3. pick an art direction: docs "styles" — append the chosen style bible to every
      visual prompt of the video (cross-shot consistency), or start from a full
-     blueprint: docs "templates" then docs "template:<id>" → import_workflow
+     blueprint: docs "templates" then docs "template:<id>" → import_workflow.
+     Need a character/décor/prop sheet? docs "designs" has ready prompt recipes
+     (wire the resulting node as a REFERENCE, never a frame anchor)
   4. add_node / connect_nodes / update_node — or import_workflow for a whole plan
   5. run_node (COSTS MONEY — each run calls the kie.ai API); completion is
      asynchronous: poll get_generations until status is success/failed.
@@ -40,7 +43,7 @@ Conventions:
     always set an AI-facing "description" so future agents know what the media depicts.
   - The user sees the graph update live in the app while you work.
 
-Other topics: "workflow-json", "models", "model:<id>", "prompting:<id>", "styles", "templates", "template:<id>".`
+Other topics: "workflow-json", "models", "model:<id>", "prompting:<id>", "styles", "designs", "templates", "template:<id>".`
 
 const WORKFLOW_JSON = `Workflow JSON (version 1) — the bulk import/export format (import_workflow / export_workflow):
 {
@@ -141,6 +144,25 @@ lever: append it verbatim to every image/video prompt of the video.
 ${entries.join('\n\n')}`
 }
 
+function designsIndex(): string {
+  const entries = DESIGN_RECIPES.map((r) => {
+    const prompt = buildDesignPrompt(r, r.defaultModelId, { description: '' })
+    return `── ${r.id} — ${r.label}
+${r.description}
+Model: ${r.defaultModelId}${r.params ? ` · params: ${JSON.stringify(r.params)}` : ''}
+Node intent: ${designIntent(r)}
+Prompt (replace ${r.slot} with the subject; keep the video's style bible appended when one is set):
+${prompt}`
+  })
+  return `Design recipes — ready prompts for reusable design sheets (add_node with the recipe's model,
+params and prompt; give the node the recipe's intent). CRITICAL: a design node's output is a
+REFERENCE — wire it to reference inputs only (e.g. Seedance 2 "reference_image_urls" with a role
+in the prompt like "matches the design @Image1, reference only"), NEVER to a frame-anchor input
+(seedance-1.5 "input_urls", grok "image_urls") where it would appear on screen.
+
+${entries.join('\n\n')}`
+}
+
 function templatesIndex(): string {
   const lines = WORKFLOW_TEMPLATES.map(
     (t) =>
@@ -166,7 +188,7 @@ ${JSON.stringify(t.workflow, null, 2)}`
 }
 
 export const DOC_TOPICS =
-  'overview | workflow-json | models | model:<id> | prompting:<id> | styles | templates | template:<id>'
+  'overview | workflow-json | models | model:<id> | prompting:<id> | styles | designs | templates | template:<id>'
 
 export function getDoc(topic: string): string {
   if (topic === 'overview') return OVERVIEW
@@ -175,6 +197,7 @@ export function getDoc(topic: string): string {
   if (topic.startsWith('model:')) return modelDetail(topic.slice('model:'.length))
   if (topic.startsWith('prompting:')) return promptingGuide(topic.slice('prompting:'.length))
   if (topic === 'styles') return stylesIndex()
+  if (topic === 'designs') return designsIndex()
   if (topic === 'templates') return templatesIndex()
   if (topic.startsWith('template:')) return templateDetail(topic.slice('template:'.length))
   return `Unknown topic "${topic}". Valid topics: ${DOC_TOPICS}`

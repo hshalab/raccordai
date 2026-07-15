@@ -24,6 +24,13 @@ export function broadcastWorkflowChanged(videoId: string): void {
   }
 }
 
+/** A generation settled — the kie.ai balance likely moved; the toolbar refetches it. */
+export function broadcastCreditsChanged(): void {
+  for (const window of BrowserWindow.getAllWindows()) {
+    window.webContents.send('event:creditsChanged', {})
+  }
+}
+
 export function broadcastChatUpdate(videoId: string): void {
   for (const window of BrowserWindow.getAllWindows()) {
     window.webContents.send('event:chatUpdate', { videoId })

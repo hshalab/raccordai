@@ -55,6 +55,7 @@ export const grokImagineI2V: ModelDefinition<Params> = {
       accepts: ['image'],
       multiple: true,
       required: true,
+      frameAnchor: true,
       referenceAlias: '@image',
       description:
         'One or more source images, referenced as @image1, @image2, … in the motion prompt (lowercase, each followed by a space).'

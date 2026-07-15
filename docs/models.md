@@ -135,6 +135,11 @@ Rules that follow:
   time). The UI shows the numbering on the node; the run engine records the
   alias map in the generation's input snapshot. Only for models whose API
   understands such references (grok).
+- `frameAnchor: true` — declare it on every image input whose connected images
+  APPEAR in the output literally (seedance-1.5 `input_urls`, grok
+  `image_urls`). It is machine-readable semantics for the pitfall above: the
+  template tests derive the frame-anchor set from it, and the editor warns
+  when a design node (`src/shared/designs/registry.ts`) is wired to one.
 - `outputs` — usually one `{ key: 'output', kind }`. Video models should also
   declare `{ key: 'lastFrame', label: 'Last frame', kind: 'image' }`: the
   renderer extracts the final frame of every successful video generation in

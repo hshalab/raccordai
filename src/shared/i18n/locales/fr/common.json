@@ -26,6 +26,11 @@
     "fr": "Français",
     "en": "English"
   },
+  "credits": {
+    "label": "crédits",
+    "title": "Crédits kie.ai restants sur votre compte",
+    "refresh": "Rafraîchir les crédits kie.ai"
+  },
   "flags": {
     "title": "Feature flags",
     "overridden": "forcé",
@@ -171,13 +176,19 @@
     "addNodeTitle": "Ajouter un nœud au canvas",
     "filterPlaceholder": "Filtrer les modèles… (ex. seedance, image)",
     "noModelMatch": "Aucun modèle ne correspond à « {{query}} ».",
-    "assetEntry": "Asset (bibliothèque du projet)",
+    "assetEntry": "Asset",
+    "assetEntryDesc": "Réutiliser une image, vidéo ou son de la bibliothèque du projet",
     "kinds": {
+      "design": "Designs",
       "image": "Image",
       "video": "Vidéo",
       "audio": "Audio",
       "asset": "Studio"
     },
+    "designHint": "Décris le sujet en quelques mots — le prompt est généré pour le modèle et le style de la vidéo. Branche ensuite ce nœud en entrée « reference » de tes plans.",
+    "designAdd": "Créer le nœud",
+    "designBack": "Retour à la liste",
+    "designFrameAnchorConfirm": "« {{label}} » est une planche de design : branchée sur « {{handle}} », elle apparaîtra À L'ÉCRAN dans la vidéo. Utilise plutôt une entrée « reference » (Seedance 2). Connecter quand même ?",
     "generateVideos": "Générer les vidéos",
     "generating": "Génération…",
     "noVideoNodes": "Aucun nœud vidéo dans le workflow",
@@ -249,6 +260,28 @@
     "documentary": {
       "name": "Documentaire",
       "desc": "Naturaliste — lumière disponible, caméra observationnelle"
+    }
+  },
+  "designs": {
+    "character": {
+      "name": "Personnage",
+      "desc": "Planche de character design (turnaround 3 vues)",
+      "placeholder": "ex. Léa, 20 ans, cheveux roses, veste jaune"
+    },
+    "decor": {
+      "name": "Décor",
+      "desc": "Design d'environnement — le lieu comme un plateau",
+      "placeholder": "ex. café parisien au crépuscule, néons roses"
+    },
+    "prop": {
+      "name": "Accessoire",
+      "desc": "Planche d'objet (3 angles + détail)",
+      "placeholder": "ex. épée ancienne gravée de runes"
+    },
+    "styleframe": {
+      "name": "Image de style",
+      "desc": "Un cadre qui fixe le look du film",
+      "placeholder": "ex. ruelle sous la pluie, ambiance polar"
     }
   },
   "templates": {

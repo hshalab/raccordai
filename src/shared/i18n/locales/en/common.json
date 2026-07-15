@@ -26,6 +26,11 @@
     "fr": "Français",
     "en": "English"
   },
+  "credits": {
+    "label": "credits",
+    "title": "Remaining kie.ai credits on your account",
+    "refresh": "Refresh kie.ai credits"
+  },
   "flags": {
     "title": "Feature flags",
     "overridden": "overridden",
@@ -171,13 +176,19 @@
     "addNodeTitle": "Add a node to the canvas",
     "filterPlaceholder": "Filter models… (e.g. seedance, image)",
     "noModelMatch": "No model matches “{{query}}”.",
-    "assetEntry": "Asset (project library)",
+    "assetEntry": "Asset",
+    "assetEntryDesc": "Reuse an image, video or sound from the project library",
     "kinds": {
+      "design": "Designs",
       "image": "Image",
       "video": "Video",
       "audio": "Audio",
       "asset": "Studio"
     },
+    "designHint": "Describe the subject in a few words — the prompt is built for the model and the video's style. Then wire this node into your shots' “reference” inputs.",
+    "designAdd": "Create node",
+    "designBack": "Back to the list",
+    "designFrameAnchorConfirm": "“{{label}}” is a design sheet: wired to “{{handle}}”, it will appear ON SCREEN in the video. Use a “reference” input instead (Seedance 2). Connect anyway?",
     "generateVideos": "Generate videos",
     "generating": "Generating…",
     "noVideoNodes": "No video node in the workflow",
@@ -249,6 +260,28 @@
     "documentary": {
       "name": "Documentary",
       "desc": "Naturalistic — available light, observational camera"
+    }
+  },
+  "designs": {
+    "character": {
+      "name": "Character",
+      "desc": "Character design sheet (3-view turnaround)",
+      "placeholder": "e.g. Léa, 20, pink hair, yellow jacket"
+    },
+    "decor": {
+      "name": "Set / location",
+      "desc": "Environment design — the place as a film set",
+      "placeholder": "e.g. Parisian café at dusk, pink neons"
+    },
+    "prop": {
+      "name": "Prop",
+      "desc": "Object sheet (3 angles + detail inset)",
+      "placeholder": "e.g. ancient sword engraved with runes"
+    },
+    "styleframe": {
+      "name": "Style frame",
+      "desc": "One frame that locks the film's look",
+      "placeholder": "e.g. rainy alley, noir mood"
     }
   },
   "templates": {

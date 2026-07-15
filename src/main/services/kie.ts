@@ -75,6 +75,24 @@ export async function kieGetTaskInfo(
   return json.data
 }
 
+interface KieCreditResponse {
+  code: number
+  msg: string
+  data?: number
+}
+
+/** Remaining kie.ai account credit balance. */
+export async function kieGetCredits(): Promise<number> {
+  const res = await fetch(`${KIE_BASE}/api/v1/chat/credit`, {
+    headers: { Authorization: `Bearer ${getApiKey()}` }
+  })
+  const json = (await res.json()) as KieCreditResponse
+  if (!res.ok || json.code !== 200 || typeof json.data !== 'number') {
+    throw new Error(`kie.ai credit check failed (${json.code}): ${json.msg}`)
+  }
+  return json.data
+}
+
 /** Extracts the first result URL from kie.ai's stringified resultJson. */
 export function parseResultUrl(resultJson: string | undefined | null): string | undefined {
   if (!resultJson) return undefined

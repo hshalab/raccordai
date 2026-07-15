@@ -2,6 +2,7 @@ import { Link, Outlet, createRootRoute } from '@tanstack/react-router'
 import { Settings } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { HeaderActions, MenuBar, MenuBarProvider } from '@renderer/components/menubar/MenuBar'
+import { HeaderCredits } from '@renderer/components/HeaderCredits'
 
 export const Route = createRootRoute({
   component: RootLayout
@@ -17,6 +18,7 @@ function RootLayout(): React.JSX.Element {
           {/* Pages contribute their menus (Fichier, …) while mounted. */}
           <MenuBar />
           <div className="flex-1" />
+          <HeaderCredits />
           <HeaderActions />
           <Link
             to="/settings"

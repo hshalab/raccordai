@@ -1,13 +1,13 @@
 import { randomUUID } from 'node:crypto'
 import { writeFileSync } from 'node:fs'
 import { extname, join } from 'node:path'
-import { desc, eq, inArray } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNull } from 'drizzle-orm'
 import { estimateCreditsFor, getModel, getModelOrThrow } from '@shared/models'
 import { getDb } from '../db/client'
 import { assets, edges, generations, nodes, videos } from '../db/schema'
 import { emitGenerationSettled, onGenerationSettled } from '../bus'
-import { broadcastGenerationsChanged } from '../events'
-import { mediaDirFor } from '../media/files'
+import { broadcastCreditsChanged, broadcastGenerationsChanged } from '../events'
+import { mediaDirFor, mimeTypeFor } from '../media/files'
 import { GenerationQueue, isRetryableGenerationError, withRetry } from './genQueue'
 import {
   kieCreateSunoTask,
@@ -42,6 +42,7 @@ const queue = new GenerationQueue(getMaxConcurrentGenerations)
 onGenerationSettled((event) => {
   queue.release(event.generationId)
   retryCounts.delete(event.generationId)
+  broadcastCreditsChanged()
 })
 
 // ── Smart retry ───────────────────────────────────────────────────────────────
@@ -143,16 +144,38 @@ async function publicUrlForAsset(assetId: string): Promise<string | null> {
   return url
 }
 
+/** How long a run waits for the renderer's last-frame extraction to land. */
+const LAST_FRAME_WAIT_MS = 45_000
+const LAST_FRAME_POLL_MS = 500
+
+/**
+ * The last frame is extracted by the renderer (browser-side video decode)
+ * shortly AFTER the upstream generation succeeds — a downstream run launched
+ * right away (chained runs, eager user) races it. Poll the row instead of
+ * failing the run outright.
+ */
+async function waitForLastFramePath(generationId: string): Promise<string | null> {
+  const deadline = Date.now() + LAST_FRAME_WAIT_MS
+  while (Date.now() < deadline) {
+    const row = getDb().select().from(generations).where(eq(generations.id, generationId)).get()
+    if (!row || row.status !== 'success') return null
+    if (row.lastFramePath) return row.lastFramePath
+    await new Promise((resolve) => setTimeout(resolve, LAST_FRAME_POLL_MS))
+  }
+  return null
+}
+
 async function publicUrlForGeneration(
   gen: GenerationRow,
   sourceHandle: string
 ): Promise<string | null> {
   const db = getDb()
   if (sourceHandle === 'lastFrame') {
-    if (!gen.lastFramePath) return null
+    const lastFramePath = gen.lastFramePath ?? (await waitForLastFramePath(gen.id))
+    if (!lastFramePath) return null
     const cached = uploadFresh(gen.lastFrameUploadedUrl, gen.lastFrameUploadedAt)
     if (cached) return cached
-    const url = await kieUploadFile(gen.lastFramePath, 'raccord/frames')
+    const url = await kieUploadFile(lastFramePath, 'raccord/frames')
     db.update(generations)
       .set({ lastFrameUploadedUrl: url, lastFrameUploadedAt: Date.now() })
       .where(eq(generations.id, gen.id))
@@ -243,7 +266,7 @@ async function prepareRun(nodeId: string): Promise<PreparedRun> {
     if (!url) {
       const hint =
         edge.sourceHandle === 'lastFrame'
-          ? ` (lastFrame may still be extracting — wait a moment and retry)`
+          ? ` (the last frame could not be extracted — keep this video's editor open so extraction can run, then retry)`
           : ` — run or select an output on the upstream node first.`
       throw new Error(
         `Input "${edge.targetHandle}" has no resolvable source from "${source.label ?? source.key}.${edge.sourceHandle}"${hint}`
@@ -328,7 +351,14 @@ function claimRun(
 
 // ── Completion + local media download ────────────────────────────────────────
 
-function extForContentType(contentType: string | null, fallbackUrl: string): string {
+/** Fallback extension per model kind — kie's endpoints deliver these formats. */
+const EXT_BY_KIND: Record<string, string> = { video: '.mp4', image: '.jpg', audio: '.mp3' }
+
+function extForContentType(
+  contentType: string | null,
+  fallbackUrl: string,
+  defaultExt?: string
+): string {
   const mime = contentType?.split(';')[0]?.trim() ?? ''
   const byMime: Record<string, string> = {
     'image/jpeg': '.jpg',
@@ -342,8 +372,12 @@ function extForContentType(contentType: string | null, fallbackUrl: string): str
     'audio/mp4': '.m4a'
   }
   if (byMime[mime]) return byMime[mime]
-  const urlExt = extname(new URL(fallbackUrl).pathname)
-  return urlExt || '.bin'
+  // Unknown/generic Content-Type (e.g. application/octet-stream): trust the
+  // URL only if its extension is a known media type, else fall back to the
+  // model kind — a .bin file would be refused by Chromium's <video>.
+  const urlExt = extname(new URL(fallbackUrl).pathname).toLowerCase()
+  if (urlExt && mimeTypeFor(`f${urlExt}`)) return urlExt
+  return defaultExt ?? (urlExt || '.bin')
 }
 
 /** Downloads the kie.ai result into the managed media store (fire-and-forget). */
@@ -353,20 +387,32 @@ async function downloadResult(generationId: string): Promise<void> {
   if (!gen?.resultUrl || gen.resultPath) return
   const video = db.select().from(videos).where(eq(videos.id, gen.videoId)).get()
   if (!video) return
+  const node = db.select().from(nodes).where(eq(nodes.id, gen.nodeId)).get()
+  const kind = node ? getModel(node.modelId)?.kind : undefined
 
   const res = await fetch(gen.resultUrl)
   if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`)
   const contentType = res.headers.get('content-type')
-  const target = join(
-    mediaDirFor(video.projectId),
-    `gen-${gen.id}${extForContentType(contentType, gen.resultUrl)}`
-  )
+  const ext = extForContentType(contentType, gen.resultUrl, kind ? EXT_BY_KIND[kind] : undefined)
+  const target = join(mediaDirFor(video.projectId), `gen-${gen.id}${ext}`)
   writeFileSync(target, new Uint8Array(await res.arrayBuffer()))
+  // Store a *media* mime only — the protocol handler serves it as Content-Type
+  // (a generic application/octet-stream would make <video> undecodable).
+  const headerMime = contentType?.split(';')[0]?.trim() ?? ''
+  const mediaMime = /^(video|audio|image)\//.test(headerMime) ? headerMime : mimeTypeFor(target)
   db.update(generations)
-    .set({ resultPath: target, resultMimeType: contentType?.split(';')[0]?.trim() ?? null })
+    .set({ resultPath: target, resultMimeType: mediaMime })
     .where(eq(generations.id, generationId))
     .run()
   broadcastGenerationsChanged({ videoId: gen.videoId, nodeId: gen.nodeId })
+}
+
+/** downloadResult with backoff — a transient CDN hiccup must not strand the
+ * generation on its remote URL (kie expires results after ~3 days). */
+function downloadResultWithRetry(generationId: string): void {
+  withRetry(() => downloadResult(generationId), { attempts: 3, baseDelayMs: 3000 }).catch((err) =>
+    console.error(`[run-engine] media download failed for ${generationId}`, err)
+  )
 }
 
 function completeFromKie(
@@ -393,9 +439,7 @@ function completeFromKie(
         .where(eq(nodes.id, node.id))
         .run()
     }
-    downloadResult(generationId).catch((err) => {
-      console.error(`[run-engine] media download failed for ${generationId}`, err)
-    })
+    downloadResultWithRetry(generationId)
   } else {
     db.update(generations)
       .set({
@@ -519,6 +563,27 @@ export function resumePolling(): void {
     }
   }
   if (rows.length > 0) console.log(`[run-engine] resumed ${rows.length} in-flight generation(s)`)
+
+  // Self-heal: successful generations whose download failed are stuck on the
+  // remote kie URL, which expires after ~3 days — retry them now, serially.
+  const undownloaded = getDb()
+    .select()
+    .from(generations)
+    .where(and(eq(generations.status, 'success'), isNull(generations.resultPath)))
+    .all()
+    .filter((g) => g.resultUrl)
+  if (undownloaded.length > 0) {
+    console.log(`[run-engine] backfilling ${undownloaded.length} missing media download(s)`)
+    void (async () => {
+      for (const gen of undownloaded) {
+        try {
+          await downloadResult(gen.id)
+        } catch (err) {
+          console.error(`[run-engine] backfill download failed for ${gen.id}`, err)
+        }
+      }
+    })()
+  }
 }
 
 /** Rebuilds a ready-to-submit run from a generation's persisted input snapshot. */

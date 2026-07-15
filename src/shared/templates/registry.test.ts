@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { getModel } from '../models'
+import { MODELS, getModel } from '../models'
 import { getStyle } from '../styles/registry'
 import { WORKFLOW_TEMPLATES, getWorkflowTemplate, workflowTemplateIds } from './registry'
 
@@ -99,7 +99,11 @@ describe('workflow template registry', () => {
   // handles, and prompts must assign them a role.
   describe('input semantics', () => {
     it('image nodes marked as references never feed a frame-anchor handle', () => {
-      const FRAME_ANCHORS = new Set(['input_urls', 'image_urls'])
+      // Derived from the registry: each InputHandle declares its own semantics.
+      const FRAME_ANCHORS = new Set(
+        MODELS.flatMap((m) => m.inputs.filter((h) => h.frameAnchor).map((h) => h.key))
+      )
+      expect(FRAME_ANCHORS.size).toBeGreaterThan(0)
       for (const t of WORKFLOW_TEMPLATES) {
         for (const edge of t.workflow.edges) {
           const source = t.workflow.nodes.find((n) => n.key === edge.from)!

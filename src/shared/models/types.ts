@@ -42,6 +42,13 @@ export interface InputHandle {
   referenceAlias?: string
   /** Hard upper bound on the number of connections to this handle. Run is rejected if exceeded. */
   maxCount?: number
+  /**
+   * True when connected images APPEAR in the output literally (first/last frame),
+   * as opposed to reference inputs that only guide identity/style. Design sheets
+   * (characters, décors, props) must never be wired to a frame anchor — the UI
+   * warns and the template tests enforce it.
+   */
+  frameAnchor?: boolean
 }
 
 export interface OutputHandle {

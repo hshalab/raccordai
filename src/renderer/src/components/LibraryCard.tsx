@@ -62,7 +62,9 @@ export function LibraryCard({
             <PlaceholderIcon className="h-8 w-8 text-neutral-700" />
           </div>
         )}
-        <div className="absolute top-2 right-2 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+        {/* z-10: must paint above the thumbnail <video>, lifted to z-index 1 by
+            the .island video backdrop-filter workaround in styles.css */}
+        <div className="absolute top-2 right-2 z-10 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
           <button
             onClick={(e) => {
               e.stopPropagation()

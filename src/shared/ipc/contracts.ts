@@ -450,6 +450,11 @@ export const ipcContracts = {
     input: z.object({ projectId: z.string() }),
     output: z.object({ estimatedCredits: z.number(), generationCount: z.number() })
   },
+  /** Remaining kie.ai account credits (live query against the kie API). */
+  'kie:credits': {
+    input: z.void(),
+    output: z.object({ credits: z.number() })
+  },
   'ai:refineImagePrompt': {
     input: z.object({
       currentPrompt: z.string(),
@@ -530,7 +535,8 @@ export const ipcContracts = {
 export const ipcEvents = [
   'event:generationsChanged',
   'event:workflowChanged',
-  'event:chatUpdate'
+  'event:chatUpdate',
+  'event:creditsChanged'
 ] as const
 export type IpcEvent = (typeof ipcEvents)[number]
 

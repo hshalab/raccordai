@@ -4,6 +4,7 @@ import * as generations from '../services/generations'
 import * as graph from '../services/graph'
 import * as graphHistory from '../services/graphHistory'
 import * as projects from '../services/projects'
+import { kieGetCredits } from '../services/kie'
 import { runNode } from '../services/runEngine'
 import * as videos from '../services/videos'
 import { DOC_TOPICS, getDoc } from './docs'
@@ -43,6 +44,14 @@ export const AGENT_TOOLS: AgentTool[] = [
     description: `Raccord reference documentation, on demand. Topics: ${DOC_TOPICS}. Start with "overview"; read "model:<id>" before creating nodes for that model.`,
     inputSchema: obj({ topic: str() }, ['topic']),
     execute: ({ topic }) => getDoc(String(topic))
+  },
+
+  // ── Account ────────────────────────────────────────────────────────────────
+  {
+    name: 'get_credits',
+    description: 'Remaining kie.ai account credits (each generation consumes some).',
+    inputSchema: obj({}),
+    execute: async () => ({ credits: await kieGetCredits() })
   },
 
   // ── Navigation ─────────────────────────────────────────────────────────────

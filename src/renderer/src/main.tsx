@@ -27,6 +27,10 @@ async function bootstrap(): Promise<void> {
     void queryClient.invalidateQueries({ queryKey: ['generations'] })
     void queryClient.invalidateQueries({ queryKey: ['graph'] })
   })
+  // A generation settled — the kie.ai balance moved; refresh the toolbar chip.
+  window.api.on('event:creditsChanged', () => {
+    void queryClient.invalidateQueries({ queryKey: ['kie', 'credits'] })
+  })
   // The assistant (main process) mutated the graph — refetch everything it touches.
   window.api.on('event:workflowChanged', () => {
     void queryClient.invalidateQueries({ queryKey: ['graph'] })

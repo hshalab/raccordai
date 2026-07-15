@@ -78,6 +78,7 @@ export const seedance15Pro: ModelDefinition<Params> = {
       accepts: ['image'],
       multiple: true,
       maxCount: 2,
+      frameAnchor: true,
       description:
         '0-2 images (jpeg/png/webp, ≤10MB) that APPEAR IN THE VIDEO literally: 1 image = the exact first frame; 2 = first + last frame. ' +
         'NEVER wire a character sheet, storyboard or style reference here — it would show up on screen. ' +

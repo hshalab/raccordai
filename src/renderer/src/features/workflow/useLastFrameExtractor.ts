@@ -12,24 +12,31 @@ import { graphKeys, useVideoGenerations } from './data'
  * JPEG to the main process which stores it next to the generation. Downstream
  * 'lastFrame' edges resolve against that file.
  */
+/** A failing video (bad codec, dead remote URL) must not be re-decoded forever. */
+const MAX_EXTRACTION_ATTEMPTS = 3
+
 export function useLastFrameExtractor(videoId: string, graphNodes: GraphNode[]): void {
   const generations = useVideoGenerations(videoId).data
   const queryClient = useQueryClient()
   const inFlight = useRef(new Set<string>())
+  const attempts = useRef(new Map<string, number>())
 
   useEffect(() => {
     if (!generations) return
-    const videoNodeIds = new Set(
-      graphNodes.filter((n) => getModel(n.modelId)?.kind === 'video').map((n) => n.id)
-    )
-    const candidates = generations.filter(
-      (g) =>
-        g.status === 'success' &&
-        !g.lastFrameUrl &&
-        g.url &&
-        videoNodeIds.has(g.nodeId) &&
-        !inFlight.current.has(g.id)
-    )
+    const nodesById = new Map(graphNodes.map((n) => [n.id, n]))
+    const candidates = generations.filter((g) => {
+      if (g.status !== 'success' || g.lastFrameUrl || !g.url) return false
+      if (inFlight.current.has(g.id)) return false
+      if ((attempts.current.get(g.id) ?? 0) >= MAX_EXTRACTION_ATTEMPTS) return false
+      const node = nodesById.get(g.nodeId)
+      if (!node) return false // node deleted — no edge can consume the frame
+      // Model kind when the model is known; unknown ids (imported graphs,
+      // retired models) fall back to the recorded mime so their generations
+      // still get a last frame.
+      const model = getModel(node.modelId)
+      if (model) return model.kind === 'video'
+      return g.resultMimeType?.startsWith('video/') ?? false
+    })
     if (candidates.length === 0) return
 
     // Serial: frame extraction decodes a whole video — one at a time is plenty.
@@ -53,6 +60,7 @@ export function useLastFrameExtractor(videoId: string, graphNodes: GraphNode[]):
             queryKey: graphKeys.generationsForVideo(videoId)
           })
         } catch (err) {
+          attempts.current.set(gen.id, (attempts.current.get(gen.id) ?? 0) + 1)
           console.error(`[last-frame] extraction failed for ${gen.id}`, err)
         } finally {
           inFlight.current.delete(gen.id)

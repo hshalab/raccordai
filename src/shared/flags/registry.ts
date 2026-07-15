@@ -28,6 +28,11 @@ export const flagRegistry = {
     description:
       'Style templates (video art direction) and workflow blueprints ("new video from template")',
     defaults: { dev: true, beta: false, stable: false }
+  },
+  'design-recipes': {
+    description:
+      'Design nodes in the add-node menu (character/décor/prop sheets with model-adjusted prompts)',
+    defaults: { dev: true, beta: false, stable: false }
   }
 } as const satisfies Record<string, FlagDefinition>
 
