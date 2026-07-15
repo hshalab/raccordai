@@ -1,6 +1,9 @@
 import type { ModelDefinition } from './types'
 import { gptImage2T2I } from './gpt-image-2-t2i'
 import { gptImage2I2I } from './gpt-image-2-i2i'
+import { nanoBananaPro } from './nano-banana-pro'
+import { nanoBanana2 } from './nano-banana-2'
+import { nanoBanana2Lite } from './nano-banana-2-lite'
 import { seedance2Fast } from './seedance-2-fast'
 import { seedance15Pro } from './seedance-15-pro'
 import { grokImagineI2V } from './grok-imagine-i2v'
@@ -14,6 +17,9 @@ import { sunoMusic } from './suno-music'
 export const MODELS: ModelDefinition[] = [
   gptImage2T2I,
   gptImage2I2I,
+  nanoBananaPro,
+  nanoBanana2,
+  nanoBanana2Lite,
   seedance2Fast,
   seedance15Pro,
   grokImagineI2V,

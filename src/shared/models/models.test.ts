@@ -133,6 +133,50 @@ describe('buildPayload shapes', () => {
   })
 })
 
+describe('nano banana family', () => {
+  it('nano-banana-pro charges 18 credits at 1K/2K and 24 at 4K', () => {
+    expect(estimateCreditsFor('nano-banana-pro', { prompt: 'x' })).toBe(18)
+    expect(estimateCreditsFor('nano-banana-pro', { prompt: 'x', resolution: '2K' })).toBe(18)
+    expect(estimateCreditsFor('nano-banana-pro', { prompt: 'x', resolution: '4K' })).toBe(24)
+  })
+
+  it('nano-banana-2 scales credits with resolution', () => {
+    expect(estimateCreditsFor('nano-banana-2', { prompt: 'x' })).toBe(8)
+    expect(estimateCreditsFor('nano-banana-2', { prompt: 'x', resolution: '2K' })).toBe(12)
+    expect(estimateCreditsFor('nano-banana-2', { prompt: 'x', resolution: '4K' })).toBe(18)
+  })
+
+  it('nano-banana-2 forwards inputs on image_input with resolution and format', () => {
+    const model = getModelOrThrow('nano-banana-2')
+    const params = model.paramsSchema.parse({ prompt: 'a cat', output_format: 'jpg' })
+    const payload = model.buildPayload({
+      params,
+      inputs: { image_input: ['https://x/img.png'] }
+    })
+    expect(payload).toEqual({
+      prompt: 'a cat',
+      image_input: ['https://x/img.png'],
+      aspect_ratio: 'auto',
+      resolution: '1K',
+      output_format: 'jpg'
+    })
+  })
+
+  it('nano-banana-2-lite sends image_urls and no resolution/format', () => {
+    const model = getModelOrThrow('nano-banana-2-lite')
+    const params = model.paramsSchema.parse({ prompt: 'a pig on the grass' })
+    const payload = model.buildPayload({
+      params,
+      inputs: { image_urls: ['https://x/a.png'] }
+    })
+    expect(payload).toEqual({
+      prompt: 'a pig on the grass',
+      image_urls: ['https://x/a.png'],
+      aspect_ratio: 'auto'
+    })
+  })
+})
+
 describe('suno/generate-music', () => {
   const suno = getModelOrThrow('suno/generate-music')
 
