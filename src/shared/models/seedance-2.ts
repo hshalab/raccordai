@@ -3,25 +3,25 @@ import type { ModelDefinition } from './types'
 import { SEEDANCE2_PROMPT_GUIDE } from './seedance2-prompting'
 
 const ASPECT = ['16:9', '4:3', '1:1', '3:4', '9:16', '21:9', 'adaptive'] as const
-const RESOLUTION = ['480p', '720p'] as const
+const RESOLUTION = ['480p', '720p', '1080p', '4k'] as const
 
 const paramsSchema = z.object({
   prompt: z.string().max(20000).default(''),
   generate_audio: z.boolean().default(true),
   resolution: z.enum(RESOLUTION).default('720p'),
   aspect_ratio: z.enum(ASPECT).default('16:9'),
-  duration: z.number().int().min(4).max(15).default(15),
+  duration: z.number().int().min(4).max(15).default(5),
   web_search: z.boolean().default(false),
   nsfw_checker: z.boolean().default(true)
 })
 
 type Params = z.infer<typeof paramsSchema>
 
-export const seedance2Fast: ModelDefinition<Params> = {
-  id: 'bytedance/seedance-2-fast',
-  label: 'Seedance 2 Fast',
+export const seedance2: ModelDefinition<Params> = {
+  id: 'bytedance/seedance-2',
+  label: 'Seedance 2',
   description:
-    'Video generation driven by @ references: connected images/videos/audio GUIDE identity, style and motion without appearing on screen (unless given a frame role). The model for character sheets, storyboards and style boards.',
+    'The full Seedance 2.0 tier — same @ reference system as Fast/Mini, plus 1080p and 4k output. For live-action realism and final masters; for animation, Fast matches its quality at a fraction of the cost.',
   kind: 'video',
   paramsSchema,
   paramFields: [
@@ -33,7 +33,7 @@ export const seedance2Fast: ModelDefinition<Params> = {
       min: 4,
       max: 15,
       step: 1,
-      defaultValue: 15
+      defaultValue: 5
     },
     {
       key: 'aspect_ratio',
@@ -48,7 +48,8 @@ export const seedance2Fast: ModelDefinition<Params> = {
       label: 'Resolution',
       type: 'select',
       defaultValue: '720p',
-      options: RESOLUTION.map((v) => ({ value: v, label: v }))
+      options: RESOLUTION.map((v) => ({ value: v, label: v })),
+      description: '1080p/4k are exclusive to this tier — and priced accordingly.'
     },
     { key: 'generate_audio', label: 'Generate audio', type: 'boolean', defaultValue: true },
     { key: 'web_search', label: 'Web search', type: 'boolean', defaultValue: false },
@@ -108,16 +109,15 @@ export const seedance2Fast: ModelDefinition<Params> = {
     { key: 'lastFrame', label: 'Last frame', kind: 'image' }
   ],
   promptingNotes:
-    'Seedance 2.0 uses the @ reference system — assign each connected source a clear role in the prompt.\n' +
-    'References GUIDE the output without appearing on screen: this is THE model for character sheets, storyboards and style boards (on Seedance 1.5, connected images literally become frames). To show an image literally, use the First/Last frame anchor handles (mutually exclusive with @ references per run) — or give a reference a frame role: "@Image1 as the first frame".\n' +
-    'ANIMATION verdict (300-generation test): Fast output is indistinguishable from full Seedance 2 — iterate and ship animation here; only the 720p cap differs (upscale externally, or switch the node to Seedance 2 for native 1080p/4k).\n' +
-    'Examples: "reference @Video1\'s camera movement", "BGM references @Audio1", "Change the man in @Video1 to the robot in @Image1" (character swap), "Change the season in @Video1 to winter" (scene fix).\n' +
-    'Continuity: video extend (previous clip as @Video1 + "[cut]"-separated next beats) preserves set, identity AND voice — prefer it when characters speak; otherwise chain the previous node\'s `lastFrame` into First frame (or reference_image_urls + "@Image1 as the first frame").\n' +
-    'For 10s+ outputs, use numbered shots ("Shot 1: ... Shot 2: Cut to ...") or "[cut]" beats — ByteDance flags exact timestamps (0–3s style) as unstable.\n' +
+    'Same @ reference system as Seedance 2 Fast/Mini — references GUIDE without appearing on screen; assign every connected source an explicit role.\n' +
+    'This is the only tier with 1080p/4k: reserve it for live-action realism and final masters. For ANIMATION, Seedance 2 Fast produces indistinguishable results (300-test verdict) at 720p — iterate there and switch the node here only if native 1080p+ is required.\n' +
+    'First/Last frame handles are literal anchors (mutually exclusive with @ references per run). Both anchors + "Show me what happens in between. USE MULTIPLE CAMERA ANGLES." fills the story between two stills.\n' +
+    'Video extend (previous clip as @Video1 + "[cut]"-separated next beats) preserves set, identity AND voice across clips — stronger than lastFrame chaining when characters speak.\n' +
+    'For 10s+ outputs, use numbered shots or "[cut]" beats — never exact timestamps (officially unstable).\n' +
     'Total uploads cap: ≤ 12 files combined. Restriction: no realistic human faces in references (platform compliance).',
   promptGuide: SEEDANCE2_PROMPT_GUIDE,
-  // Indicative per-second rates by resolution — align with https://kie.ai/pricing.
-  estimateCredits: (params) => (params.resolution === '720p' ? 4 : 2) * params.duration,
+  // kie.ai has not published per-second rates for this model yet — add
+  // estimateCredits once https://kie.ai/pricing lists Seedance 2.0.
   buildPayload: ({ params, inputs }) => {
     const first = inputs.first_frame_url?.[0]
     const last = inputs.last_frame_url?.[0]

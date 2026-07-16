@@ -102,10 +102,17 @@ burning credits (see `gpt-image-2-t2i.ts`).
 Video models take images in one of two modes, and confusing them is the #1
 workflow bug (a storyboard visibly leaking into a clip's opening frames):
 
-| Mode             | Models/handles                                        | Behavior                                                                                                                           | What to wire                                                        |
-| ---------------- | ----------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
-| **Frame anchor** | seedance-1.5-pro `input_urls`, grok `image_urls`      | The image **appears in the video** (first frame, or first+last)                                                                    | Scene stills, hero shots, previous clip's `lastFrame`               |
-| **Reference**    | seedance-2-fast `reference_image_urls` (+video/audio) | The source **guides** identity/style/motion, never shown — unless the prompt assigns a frame role (`"@Image1 as the first frame"`) | Character sheets, storyboards, style boards, camera-movement videos |
+| Mode             | Models/handles                                                                                              | Behavior                                                                                                                           | What to wire                                                        |
+| ---------------- | ----------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------- |
+| **Frame anchor** | seedance-1.5-pro `input_urls`, grok `image_urls`, seedance-2/-fast/-mini `first_frame_url`+`last_frame_url` | The image **appears in the video** (first frame, or first+last)                                                                    | Scene stills, hero shots, previous clip's `lastFrame`               |
+| **Reference**    | seedance-2/-fast/-mini `reference_image_urls` (+video/audio)                                                | The source **guides** identity/style/motion, never shown — unless the prompt assigns a frame role (`"@Image1 as the first frame"`) | Character sheets, storyboards, style boards, camera-movement videos |
+
+On the Seedance 2.x family, frame anchoring (`first_frame_url`/`last_frame_url`)
+and multimodal @ references are **mutually exclusive per run** (ByteDance) —
+wire one mode or the other. The family's shared prompt guide lives in
+`src/shared/models/seedance2-prompting.ts` (official ByteDance guide + the
+"Top 10 Seedance 2.0 Tricks" e-book: lip-sync via blank voice-over videos,
+video extend, character swap, in-between technique, omni-reference).
 
 Rules that follow:
 

@@ -133,6 +133,51 @@ describe('buildPayload shapes', () => {
   })
 })
 
+describe('seedance 2 family', () => {
+  const FAMILY = ['bytedance/seedance-2', 'bytedance/seedance-2-fast', 'bytedance/seedance-2-mini']
+
+  for (const id of FAMILY) {
+    it(`${id} declares first/last frame handles as single-connection frame anchors`, () => {
+      const model = getModelOrThrow(id)
+      for (const key of ['first_frame_url', 'last_frame_url']) {
+        const handle = model.inputs.find((i) => i.key === key)
+        expect(handle?.frameAnchor).toBe(true)
+        expect(handle?.maxCount).toBe(1)
+      }
+      // Reference handles stay guides, never anchors.
+      for (const key of ['reference_image_urls', 'reference_video_urls', 'reference_audio_urls']) {
+        expect(model.inputs.find((i) => i.key === key)?.frameAnchor).toBeUndefined()
+      }
+    })
+
+    it(`${id} omits frame anchors from the payload when unconnected, sends them when wired`, () => {
+      const model = getModelOrThrow(id)
+      const params = model.paramsSchema.parse({ prompt: 'a cat' })
+      const bare = model.buildPayload({ params, inputs: {} })
+      expect(bare).not.toHaveProperty('first_frame_url')
+      expect(bare).not.toHaveProperty('last_frame_url')
+      const anchored = model.buildPayload({
+        params,
+        inputs: { first_frame_url: ['https://x/a.png'], last_frame_url: ['https://x/b.png'] }
+      })
+      expect(anchored).toMatchObject({
+        first_frame_url: 'https://x/a.png',
+        last_frame_url: 'https://x/b.png'
+      })
+    })
+  }
+
+  it('resolution tiers match kie.ai: mini/fast cap at 720p, seedance-2 reaches 4k', () => {
+    const full = getModelOrThrow('bytedance/seedance-2')
+    expect(full.paramsSchema.safeParse({ resolution: '4k' }).success).toBe(true)
+    for (const id of ['bytedance/seedance-2-fast', 'bytedance/seedance-2-mini']) {
+      const model = getModelOrThrow(id)
+      expect(model.paramsSchema.safeParse({ resolution: '1080p' }).success).toBe(false)
+      expect(model.paramsSchema.safeParse({ resolution: '720p' }).success).toBe(true)
+    }
+  })
+})
+
 describe('nano banana family', () => {
   it('nano-banana-pro charges 18 credits at 1K/2K and 24 at 4K', () => {
     expect(estimateCreditsFor('nano-banana-pro', { prompt: 'x' })).toBe(18)

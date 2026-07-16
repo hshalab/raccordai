@@ -4,7 +4,9 @@ import { gptImage2I2I } from './gpt-image-2-i2i'
 import { nanoBananaPro } from './nano-banana-pro'
 import { nanoBanana2 } from './nano-banana-2'
 import { nanoBanana2Lite } from './nano-banana-2-lite'
+import { seedance2 } from './seedance-2'
 import { seedance2Fast } from './seedance-2-fast'
+import { seedance2Mini } from './seedance-2-mini'
 import { seedance15Pro } from './seedance-15-pro'
 import { grokImagineI2V } from './grok-imagine-i2v'
 import { sunoMusic } from './suno-music'
@@ -20,7 +22,9 @@ export const MODELS: ModelDefinition[] = [
   nanoBananaPro,
   nanoBanana2,
   nanoBanana2Lite,
+  seedance2,
   seedance2Fast,
+  seedance2Mini,
   seedance15Pro,
   grokImagineI2V,
   sunoMusic
