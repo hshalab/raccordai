@@ -63,9 +63,11 @@ describe('model lookup', () => {
   })
 
   it('resolves legacy aliases to the replacement model', () => {
-    // Workflows saved with Grok Imagine 1.0 must keep running on 1.5.
-    const model = getModel('grok-imagine/image-to-video')
-    expect(model?.id).toBe('grok-imagine-video-1-5-preview')
+    // Workflows saved with Grok Imagine 1.5 must keep running on the current
+    // Grok i2v (which reuses the historical 'grok-imagine/image-to-video' id,
+    // so Grok 1.0 nodes resolve directly, no alias needed).
+    const model = getModel('grok-imagine-video-1-5-preview')
+    expect(model?.id).toBe('grok-imagine/image-to-video')
   })
 })
 
@@ -219,6 +221,82 @@ describe('nano banana family', () => {
       image_urls: ['https://x/a.png'],
       aspect_ratio: 'auto'
     })
+  })
+})
+
+describe('grok imagine family', () => {
+  it('i2v snaps sub-6s durations from old Grok 1.5 nodes to the API floor', () => {
+    const model = getModelOrThrow('grok-imagine/image-to-video')
+    // Old nodes stored duration 1-15 with default 8 — 4s must still parse…
+    const params = model.paramsSchema.parse({ prompt: 'walks', duration: 4 })
+    // …but the API floor is 6s.
+    const payload = model.buildPayload({ params, inputs: { image_urls: ['https://x/a.png'] } })
+    expect(payload).toMatchObject({ duration: 6, image_urls: ['https://x/a.png'] })
+  })
+
+  it('i2v omits aspect_ratio on auto and sends it when fixed', () => {
+    const model = getModelOrThrow('grok-imagine/image-to-video')
+    const auto = model.buildPayload({
+      params: model.paramsSchema.parse({ prompt: 'x' }),
+      inputs: {}
+    })
+    expect(auto).not.toHaveProperty('aspect_ratio')
+    const fixed = model.buildPayload({
+      params: model.paramsSchema.parse({ prompt: 'x', aspect_ratio: '9:16' }),
+      inputs: {}
+    })
+    expect(fixed).toMatchObject({ aspect_ratio: '9:16' })
+  })
+
+  it('i2v never offers spicy mode (rejected with external image URLs)', () => {
+    const model = getModelOrThrow('grok-imagine/image-to-video')
+    expect(model.paramsSchema.safeParse({ mode: 'spicy' }).success).toBe(false)
+    expect(
+      getModelOrThrow('grok-imagine/text-to-video').paramsSchema.safeParse({ mode: 'spicy' })
+        .success
+    ).toBe(true)
+  })
+})
+
+describe('kling-3.0/video', () => {
+  const kling = getModelOrThrow('kling-3.0/video')
+
+  it('declares first/last frame handles as single-connection frame anchors', () => {
+    for (const key of ['first_frame', 'last_frame']) {
+      const handle = kling.inputs.find((i) => i.key === key)
+      expect(handle?.frameAnchor).toBe(true)
+      expect(handle?.maxCount).toBe(1)
+    }
+  })
+
+  it('text-to-video: sends aspect_ratio, a string duration and single-shot mode', () => {
+    const params = kling.paramsSchema.parse({ prompt: 'a fox', duration: 10 })
+    const payload = kling.buildPayload({ params, inputs: {} })
+    expect(payload).toEqual({
+      prompt: 'a fox',
+      sound: false,
+      duration: '10',
+      mode: 'pro',
+      multi_shots: false,
+      aspect_ratio: '16:9'
+    })
+  })
+
+  it('anchored: composes image_urls as [first, last] and drops aspect_ratio', () => {
+    const params = kling.paramsSchema.parse({ prompt: 'a fox' })
+    const payload = kling.buildPayload({
+      params,
+      inputs: { first_frame: ['https://x/a.png'], last_frame: ['https://x/b.png'] }
+    })
+    expect(payload).toMatchObject({ image_urls: ['https://x/a.png', 'https://x/b.png'] })
+    expect(payload).not.toHaveProperty('aspect_ratio')
+  })
+
+  it('rejects a last frame without a first frame (image_urls[0] IS the first frame)', () => {
+    const params = kling.paramsSchema.parse({ prompt: 'a fox' })
+    expect(() =>
+      kling.buildPayload({ params, inputs: { last_frame: ['https://x/b.png'] } })
+    ).toThrowError(/First frame/)
   })
 })
 

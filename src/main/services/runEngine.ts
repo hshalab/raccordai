@@ -117,7 +117,14 @@ async function checkRemoteStatus(
   const data = await kieGetTaskInfo(kieTaskId)
   if (data.state === 'success')
     return { state: 'success', resultUrl: parseResultUrl(data.resultJson) }
-  if (data.state === 'fail') return { state: 'fail', failMsg: data.failMsg ?? undefined }
+  // Keep the failCode in the message: it is what lets isRetryableGenerationError
+  // classify remote 4xx rejections (bad inputs) as permanent instead of retrying.
+  if (data.state === 'fail') {
+    const failMsg =
+      [data.failCode ? `(${data.failCode})` : null, data.failMsg].filter(Boolean).join(' ') ||
+      undefined
+    return { state: 'fail', failMsg }
+  }
   return { state: 'pending' }
 }
 

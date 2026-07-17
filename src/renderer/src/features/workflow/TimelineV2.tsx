@@ -17,6 +17,7 @@ import { useTimelineFallbackImages, useVideoGenerations } from './data'
 import type { WorkflowGraph } from './workflowContext'
 import { bestGeneration, clipDuration, collectTimelineClips, useResizableHeight } from './Timeline'
 import { formatSeconds } from '../../lib/formatSeconds'
+import { VideoThumb } from '../../components/VideoThumb'
 
 /** Timeline clock formatting: tenth-of-a-second precision, never raw floats. */
 const fmt = formatSeconds
@@ -566,7 +567,7 @@ export function TimelineV2({
         {/* Player: two stacked videos, the active one visible. Width follows the
             timeline height (16:9), so resizing the island enlarges the player. */}
         <div
-          className="relative aspect-video flex-shrink-0 cursor-pointer border-r border-neutral-800 bg-black"
+          className="video-stack relative aspect-video flex-shrink-0 cursor-pointer border-r border-neutral-800 bg-black"
           onClick={() => (engine.playing ? engine.pause() : engine.play())}
           title="Play / pause (click)"
         >
@@ -661,10 +662,8 @@ export function TimelineV2({
                     }}
                   >
                     {clip.url ? (
-                      <video
+                      <VideoThumb
                         src={clip.url}
-                        muted
-                        preload="metadata"
                         className="pointer-events-none h-full w-full object-cover opacity-70 group-hover:opacity-100"
                       />
                     ) : still ? (

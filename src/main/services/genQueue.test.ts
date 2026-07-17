@@ -105,6 +105,32 @@ describe('isRetryableGenerationError', () => {
     expect(isRetryableGenerationError('kie.ai createTask failed (402): insufficient credits')).toBe(
       false
     )
+    // Remote task fail with the failCode relayed by checkRemoteStatus.
+    expect(isRetryableGenerationError('(400) reference audio rejected')).toBe(false)
+    expect(isRetryableGenerationError('Request failed with status code 400')).toBe(false)
+    expect(isRetryableGenerationError('upstream returned HTTP 404')).toBe(false)
+  })
+
+  it('retries un-coded model errors — only kie codes and policy wording are trusted', () => {
+    // Deliberate (see PERMANENT_FAILURE): without a 4xx code from kie, a
+    // deterministic model error costs a few retries rather than risking a
+    // transient one being misclassified as permanent.
+    expect(isRetryableGenerationError('reference audio duration is not accepted')).toBe(true)
+    expect(isRetryableGenerationError('(400) reference audio duration is not accepted')).toBe(false)
+  })
+
+  it('retries rate limits and transient 4xx/5xx despite permanent-looking wording', () => {
+    expect(isRetryableGenerationError('rate limit exceeded, retry shortly')).toBe(true)
+    expect(isRetryableGenerationError('(429) Too Many Requests')).toBe(true)
+    expect(isRetryableGenerationError('kie.ai createTask failed (503): service unavailable')).toBe(
+      true
+    )
+    expect(isRetryableGenerationError('model temporarily unavailable')).toBe(true)
+  })
+
+  it('does not read bare numbers as status codes', () => {
+    expect(isRetryableGenerationError('render node crashed at frame 403')).toBe(true)
+    expect(isRetryableGenerationError('generation stalled (worker 512 died)')).toBe(true)
   })
 })
 

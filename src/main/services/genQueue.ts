@@ -61,16 +61,35 @@ export class GenerationQueue {
 }
 
 /**
- * Failures that will repeat identically on every attempt: content-policy
- * rejections (kie phrases them with "violate/policy/flagged/…") and 4xx-class
- * errors (invalid params, insufficient credits — the kie code is embedded in
- * the message as "(4xx)").
+ * Failures that will repeat identically on every attempt. Deliberately keyed
+ * on kie's STRUCTURED signals only (Romain's call): content-policy wording,
+ * and a 4xx status/failCode embedded in the message — "(4xx)" from
+ * createTask/checkRemoteStatus, or "status/code/error/HTTP 4xx" prose. Codes
+ * are only matched with that context so bare numbers ("512px", "worker 403")
+ * stay neutral. Free-text model errors without a code (e.g. "reference audio
+ * too long") are NOT pattern-matched: a few wasted retries beat
+ * misclassifying a transient failure as permanent.
  */
-const PERMANENT_FAILURE =
-  /violat|policy|moderat|flagg|censor|nsfw|safety|sensitive|prohibit|inappropriate|reject|\(4\d\d\)/i
+const STATUS_CTX = String.raw`(?:\(|\b(?:http|status|code|error)\s*:?\s*)`
+const PERMANENT_FAILURE = new RegExp(
+  /violat|policy|moderat|flagg|censor|nsfw|safety|sensitive|prohibit|inappropriate|reject/.source +
+    String.raw`|${STATUS_CTX}4\d\d\b`,
+  'i'
+)
+
+/**
+ * Transient signals win over PERMANENT_FAILURE: 408/429 are 4xx yet worth
+ * retrying, and rate-limit wording ("rate limit exceeded") would otherwise
+ * trip the permanent patterns.
+ */
+const TRANSIENT_FAILURE = new RegExp(
+  String.raw`rate.?limit|too many requests|${STATUS_CTX}(?:408|429|5\d\d)\b|timed?\s?out|overload|temporar|try again later`,
+  'i'
+)
 
 /** Whether a failed generation is worth re-submitting (smart retry). */
 export function isRetryableGenerationError(message: string): boolean {
+  if (TRANSIENT_FAILURE.test(message)) return true
   return !PERMANENT_FAILURE.test(message)
 }
 

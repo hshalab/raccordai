@@ -45,6 +45,16 @@
   z-index: 1;
 }
 
+/* TimelineV2's gapless player overlays two <video> in one frame. This rule is
+   unlayered so it outranks Tailwind's `absolute` utility — without the
+   override below, the standby video is pushed BELOW the frame and every clip
+   played in that slot renders as a black player. `absolute` + the z-index
+   above still forms a stacking context, so hit-testing stays fixed. */
+.island .video-stack video {
+  position: absolute;
+  inset: 0;
+}
+
 /* The minimap lives in the bottom-left corner of the canvas island — the only
    corner no floating panel ever covers. (React Flow panels carry split
    position classes: `.bottom.left`.) */

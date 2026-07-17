@@ -16,6 +16,7 @@ import type * as React from 'react'
 import type { GraphEdge, GraphNode } from '@shared/ipc/contracts'
 import { getModel } from '@shared/models'
 import { formatSeconds } from '../../lib/formatSeconds'
+import { VideoThumb } from '../../components/VideoThumb'
 import { useNodeGenerations, useTimelineFallbackImages } from './data'
 
 interface Props {
@@ -458,7 +459,7 @@ function ClipThumb({
       {/* Thumbnail area */}
       <div className="relative aspect-video bg-neutral-950">
         {status === 'success' && selected?.url ? (
-          <video src={selected.url} muted className="h-full w-full object-cover" />
+          <VideoThumb src={selected.url} className="h-full w-full object-cover" />
         ) : status === 'still' ? (
           <img src={fallbackImageUrl} alt="" className="h-full w-full object-cover" />
         ) : status === 'running' ? (

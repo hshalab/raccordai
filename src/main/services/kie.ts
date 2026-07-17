@@ -12,6 +12,13 @@ import { mimeTypeFor } from '../media/files'
 
 export const KIE_BASE = process.env['RACCORD_KIE_BASE'] ?? 'https://api.kie.ai'
 
+/**
+ * The File Upload API lives on its own host (kieai.redpandaai.co) — api.kie.ai
+ * 404s on /api/file-stream-upload. The test override still routes uploads to
+ * the same mock server as everything else.
+ */
+export const KIE_UPLOAD_BASE = process.env['RACCORD_KIE_BASE'] ?? 'https://kieai.redpandaai.co'
+
 function getApiKey(): string {
   const key = getKieApiKey()
   if (!key) {
@@ -252,14 +259,24 @@ export async function kieUploadFile(localPath: string, uploadPath: string): Prom
   form.append('file', new Blob([new Uint8Array(bytes)], { type: mime }), basename(localPath))
   form.append('uploadPath', uploadPath)
 
-  const res = await fetch(`${KIE_BASE}/api/file-stream-upload`, {
+  const res = await fetch(`${KIE_UPLOAD_BASE}/api/file-stream-upload`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${getApiKey()}` },
     body: form
   })
-  const json = (await res.json()) as KieUploadResponse
+  const raw = await res.text()
+  let json: KieUploadResponse
+  try {
+    json = JSON.parse(raw) as KieUploadResponse
+  } catch {
+    throw new Error(
+      `kie.ai file upload returned non-JSON (HTTP ${res.status}): ${raw.slice(0, 300)}`
+    )
+  }
   if (!res.ok || json.code !== 200 || !json.data?.downloadUrl) {
-    throw new Error(`kie.ai file upload failed (${json.code}): ${json.msg}`)
+    throw new Error(
+      `kie.ai file upload failed (HTTP ${res.status}, code ${json.code ?? '?'}): ${json.msg ?? raw.slice(0, 300)}`
+    )
   }
   return json.data.downloadUrl
 }

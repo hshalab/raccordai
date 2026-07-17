@@ -2,6 +2,7 @@ import { AlertCircle, CheckCircle2, History, Loader2, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { getModel } from '@shared/models'
 import { relativeTime } from '@renderer/lib/relativeTime'
+import { VideoThumb } from '@renderer/components/VideoThumb'
 import { useGenerationHistory } from './data'
 
 interface Props {
@@ -58,12 +59,7 @@ export function HistoryPanel({ videoId, onClose, onSelectNode }: Props) {
                     <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center overflow-hidden rounded bg-neutral-900">
                       {g.status === 'success' && g.url ? (
                         isVideo ? (
-                          <video
-                            src={g.url}
-                            muted
-                            preload="metadata"
-                            className="h-full w-full object-cover"
-                          />
+                          <VideoThumb src={g.url} className="h-full w-full object-cover" />
                         ) : (
                           <img src={g.url} alt="" className="h-full w-full object-cover" />
                         )

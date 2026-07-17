@@ -9,6 +9,8 @@ import { seedance2Fast } from './seedance-2-fast'
 import { seedance2Mini } from './seedance-2-mini'
 import { seedance15Pro } from './seedance-15-pro'
 import { grokImagineI2V } from './grok-imagine-i2v'
+import { grokImagineT2V } from './grok-imagine-t2v'
+import { kling3 } from './kling-3'
 import { sunoMusic } from './suno-music'
 
 /**
@@ -26,6 +28,8 @@ export const MODELS: ModelDefinition[] = [
   seedance2Fast,
   seedance2Mini,
   seedance15Pro,
+  kling3,
+  grokImagineT2V,
   grokImagineI2V,
   sunoMusic
 ]
@@ -38,8 +42,10 @@ const MODEL_MAP = new Map<string, ModelDefinition>(MODELS.map((m) => [m.id, m]))
  * the canonical id (and the string sent to kie.ai) is always the target's `.id`.
  */
 const MODEL_ALIASES: Record<string, string> = {
-  // Grok Imagine 1.0 → 1.5 (the new default Grok video model).
-  'grok-imagine/image-to-video': 'grok-imagine-video-1-5-preview'
+  // Grok Imagine 1.5 preview → current Grok Imagine i2v. (The current model
+  // reuses the historical 'grok-imagine/image-to-video' id, so Grok 1.0 nodes
+  // resolve directly and the 1.0 → 1.5 alias is gone with the 1.5 model.)
+  'grok-imagine-video-1-5-preview': 'grok-imagine/image-to-video'
 }
 for (const [alias, target] of Object.entries(MODEL_ALIASES)) {
   const def = MODEL_MAP.get(target)

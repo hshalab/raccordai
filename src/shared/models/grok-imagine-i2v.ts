@@ -1,13 +1,22 @@
 import { z } from 'zod'
 import type { ModelDefinition } from './types'
 
-const ASPECT = ['auto', '1:1', '16:9', '9:16', '4:3', '3:4', '3:2', '2:3'] as const
+// 'auto' is a UI value: the field is omitted from the payload (the API only
+// honors aspect_ratio in multi-image mode; otherwise the source image rules).
+const ASPECT = ['auto', '16:9', '9:16', '1:1', '2:3', '3:2'] as const
 const RESOLUTION = ['480p', '720p'] as const
+// 'spicy' exists API-side but is rejected with external image URLs — which is
+// the only way Raccord feeds images — so it is not offered here.
+const MODE = ['normal', 'fun'] as const
+
+/** API floor is 6s; the schema tolerates lower values saved by Grok 1.5 nodes. */
+const MIN_API_DURATION = 6
 
 const paramsSchema = z.object({
-  prompt: z.string().max(4096).default(''),
+  prompt: z.string().max(5000).default(''),
   aspect_ratio: z.enum(ASPECT).default('auto'),
-  duration: z.number().int().min(1).max(15).default(8),
+  mode: z.enum(MODE).default('normal'),
+  duration: z.number().int().min(1).max(30).default(8),
   resolution: z.enum(RESOLUTION).default('480p'),
   nsfw_checker: z.boolean().default(true)
 })
@@ -15,19 +24,26 @@ const paramsSchema = z.object({
 type Params = z.infer<typeof paramsSchema>
 
 export const grokImagineI2V: ModelDefinition<Params> = {
-  id: 'grok-imagine-video-1-5-preview',
-  label: 'Grok Imagine 1.5 — Image to Video',
-  description: 'Animate one or more source images with a motion prompt (Grok Imagine Video 1.5).',
+  id: 'grok-imagine/image-to-video',
+  label: 'Grok Imagine — Image to Video',
+  description:
+    'Animate up to 7 source images with a motion prompt (Grok Imagine). Native audio, 6-30s clips.',
   kind: 'video',
   paramsSchema,
   paramFields: [
-    { key: 'prompt', label: 'Motion prompt', type: 'textarea', defaultValue: '' },
+    {
+      key: 'prompt',
+      label: 'Motion prompt',
+      type: 'textarea',
+      defaultValue: '',
+      description: 'Describe the MOTION — the images already provide the scene. Max 5000 chars.'
+    },
     {
       key: 'duration',
       label: 'Duration (s)',
       type: 'number',
-      min: 1,
-      max: 15,
+      min: MIN_API_DURATION,
+      max: 30,
       step: 1,
       defaultValue: 8
     },
@@ -37,7 +53,8 @@ export const grokImagineI2V: ModelDefinition<Params> = {
       type: 'select',
       defaultValue: 'auto',
       options: ASPECT.map((v) => ({ value: v, label: v })),
-      description: '`auto` follows the source image dimensions.'
+      description:
+        '`auto` follows the source image. A fixed ratio only applies with several images.'
     },
     {
       key: 'resolution',
@@ -45,6 +62,14 @@ export const grokImagineI2V: ModelDefinition<Params> = {
       type: 'select',
       defaultValue: '480p',
       options: RESOLUTION.map((v) => ({ value: v, label: v }))
+    },
+    {
+      key: 'mode',
+      label: 'Mode',
+      type: 'select',
+      defaultValue: 'normal',
+      options: MODE.map((v) => ({ value: v, label: v })),
+      description: '`fun` exaggerates motion.'
     },
     { key: 'nsfw_checker', label: 'NSFW checker', type: 'boolean', defaultValue: true }
   ],
@@ -55,10 +80,11 @@ export const grokImagineI2V: ModelDefinition<Params> = {
       accepts: ['image'],
       multiple: true,
       required: true,
+      maxCount: 7,
       frameAnchor: true,
       referenceAlias: '@image',
       description:
-        'One or more source images, referenced as @image1, @image2, … in the motion prompt (lowercase, each followed by a space).'
+        'Up to 7 source images (JPEG/PNG/WEBP, 10MB each) that APPEAR in the video, referenced as @image1, @image2, … in the motion prompt.'
     }
   ],
   outputs: [
@@ -66,11 +92,11 @@ export const grokImagineI2V: ModelDefinition<Params> = {
     { key: 'lastFrame', label: 'Last frame', kind: 'image' }
   ],
   promptingNotes:
-    'Grok Imagine 1.5 animates one or more images — the connected images ARE the visual content of the video (frame anchors, like Seedance 1.5; NOT invisible references like Seedance 2). Never wire a character sheet or storyboard here.\n' +
+    'Grok Imagine animates up to 7 images — the connected images ARE the visual content of the video (frame anchors, like Seedance 1.5; NOT invisible references like Seedance 2). Never wire a character sheet or storyboard here.\n' +
     'In the motion prompt, reference each as `@image1 `, `@image2 `, … (lowercase, each followed by a space) — e.g. "@image1 slowly walks forward, wind in the hair".\n' +
     'Numbering follows connection order (shown in the UI). Connect at least one image.\n' +
-    'Duration is 1–15 seconds (default 8). Set `aspect_ratio` to `auto` to follow the source image, or pick a fixed ratio.\n' +
-    "For continuity to the next clip: wire this node's `lastFrame` output into the next video node's image input (`image_urls` for another Grok, or `reference_image_urls` for Seedance).",
+    'Duration is 6-30 seconds (default 8). Keep `aspect_ratio` on `auto` to follow the source image (a fixed ratio only matters with several images).\n' +
+    "For continuity to the next clip: wire this node's `lastFrame` output into the next video node's image input (`image_urls` for another Grok, or `reference_image_urls` for Seedance 2).",
   // Distilled from xAI's official docs (docs.x.ai) and xAI's Replicate model listing.
   promptGuide: `CORE PRINCIPLE (official xAI guidance):
   Describe the MOTION, not the scene — the connected image already provides the scene.
@@ -81,7 +107,7 @@ MOTION:
   - Be specific about intensity: "car racing past at high speed", not "car passing".
   - One or two actions max — too many simultaneous actions degrade the clip.
   - Natural sentences, not tag stacking. Think like a director.
-  - Sweet spot: 5-8 second clips; keep the motion brief and readable.
+  - Sweet spot: 6-10 second clips; keep the motion brief and readable.
 
 CAMERA (vocabulary the model recognizes):
   pan, tilt, zoom, dolly, tracking shot, orbit, aerial, handheld, push-in, static framing.
@@ -97,11 +123,12 @@ AUDIO (native — music, SFX, lip-synced dialogue in the same pass):
   she says happily: "thanks! Back to work". Optionally end with an "AUDIO:" section for sound design.
 
 PARAMS:
-  aspect_ratio=auto follows the source image (recommended); forcing a different ratio STRETCHES it.
-  Duration 1-15s, default 8.
+  aspect_ratio=auto follows the source image (recommended); a fixed ratio only applies when
+  several images are connected. Duration 6-30s, default 8.
 
 PITFALLS:
   - Negative prompts are ignored — phrase everything positively.
+  - English prompts only.
   - Vague motion verbs without intensity produce timid animation.
   - When the clip belongs to a styled workflow, keep the style bible short here (motion first).
 
@@ -109,14 +136,16 @@ FULL EXAMPLES (official patterns):
   "@image1 slowly turns her head to the right and smiles, soft breeze moving her hair, gentle camera push-in."
   "@image1 the sneaker rotates smoothly on the pedestal, camera orbiting at eye level, dramatic spotlight
   sweeping across the surface, upbeat electronic music."`,
-  // Indicative per-second rates by resolution — align with https://kie.ai/pricing.
-  estimateCredits: (params) => (params.resolution === '720p' ? 2 : 1) * params.duration,
+  // No estimateCredits: kie.ai publishes no rate for this generation of Grok
+  // yet — fill in from the dashboard (https://kie.ai/pricing); never guess.
   buildPayload: ({ params, inputs }) => ({
     image_urls: inputs.image_urls ?? [],
     prompt: params.prompt,
-    aspect_ratio: params.aspect_ratio,
-    duration: params.duration,
+    mode: params.mode,
+    // Old Grok 1.5 nodes may carry 1-5s durations — snap to the API floor.
+    duration: Math.max(MIN_API_DURATION, params.duration),
     resolution: params.resolution,
-    nsfw_checker: params.nsfw_checker
+    nsfw_checker: params.nsfw_checker,
+    ...(params.aspect_ratio !== 'auto' ? { aspect_ratio: params.aspect_ratio } : {})
   })
 }
