@@ -45,9 +45,10 @@ export type ToolScope = 'global' | 'project' | 'video'
 /**
  * Blast radius of the tool. 'read' = no state change (no UI refresh);
  * 'write' = reversible-ish mutation; 'destructive' = permanent data loss —
- * the CHAT surface requires user approval (`confirm: true` after an action
- * card; MCP clients remain the human's own agent and execute directly);
- * 'spending' = calls kie.ai and costs credits.
+ * the CHAT surface always requires user approval (`confirm: true` after an
+ * action card); 'spending' = calls kie.ai and costs credits, gated the same
+ * way while the `assistantRunApproval` setting is 'ask' (the default).
+ * MCP clients remain the human's own agent and execute directly either way.
  */
 export type ToolRisk = 'read' | 'write' | 'destructive' | 'spending'
 
@@ -411,8 +412,12 @@ export const AGENT_TOOLS: AgentTool[] = [
         label: str('Short display label, e.g. "Shot 01 — The harbor"'),
         intent: str('Expected result, shown to the user'),
         params: { type: 'object' },
-        x: { type: 'number' },
-        y: { type: 'number' }
+        x: {
+          type: 'number',
+          description:
+            'Canvas x. Omit BOTH x and y to drop the node in the next free slot — never pass 0/0 to mean "anywhere", it stacks nodes on top of each other. Left-to-right flow: 0, 420, 840…'
+        },
+        y: { type: 'number', description: 'Canvas y. Rows are spaced ~350 apart.' }
       },
       ['videoId', 'modelId']
     ),
@@ -422,7 +427,9 @@ export const AGENT_TOOLS: AgentTool[] = [
       graph.createNode({
         videoId: String(videoId),
         modelId: String(modelId),
-        position: { x: Number(x ?? 0), y: Number(y ?? 0) },
+        ...(x === undefined && y === undefined
+          ? {}
+          : { position: { x: Number(x ?? 0), y: Number(y ?? 0) } }),
         label: label ? String(label) : undefined,
         intent: intent ? String(intent) : undefined,
         params
