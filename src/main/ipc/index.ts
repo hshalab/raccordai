@@ -18,6 +18,7 @@ import * as library from '../services/library'
 import * as projects from '../services/projects'
 import { kieGetCredits, kieTestApiKey } from '../services/kie'
 import * as notificationsService from '../services/notifications'
+import * as runBatchService from '../services/runBatch'
 import * as renderService from '../services/render'
 import * as runEngine from '../services/runEngine'
 import * as settingsService from '../services/settings'
@@ -105,6 +106,17 @@ export function registerIpcHandlers(): void {
       withAssetUrl(assetsService.importAssetFromFile(projectId, p))
     )
   })
+  handle('assets:importFromPaths', ({ projectId, paths }) => {
+    const imported: ReturnType<typeof withAssetUrl>[] = []
+    for (const p of paths) {
+      try {
+        imported.push(withAssetUrl(assetsService.importAssetFromFile(projectId, p)))
+      } catch {
+        // Unsupported file type — the renderer reports the skipped count.
+      }
+    }
+    return imported
+  })
   handle('assets:update', ({ assetId, ...patch }) => assetsService.updateAsset(assetId, patch))
   handle('assets:remove', ({ assetId }) => assetsService.deleteAsset(assetId))
   handle('assets:references', ({ assetId }) => assetsService.assetReferences(assetId))
@@ -128,6 +140,7 @@ export function registerIpcHandlers(): void {
   handle('nodes:remove', ({ nodeId }) => graph.removeNode(nodeId))
   handle('edges:connect', (input) => graph.connectNodes(input))
   handle('edges:disconnect', ({ edgeId }) => graph.disconnectEdge(edgeId))
+  handle('edges:reorder', (input) => graph.reorderEdges(input))
 
   handle('history:state', ({ videoId }) => graphHistory.historyState(videoId))
   handle('history:undo', ({ videoId }) => {
@@ -171,6 +184,15 @@ export function registerIpcHandlers(): void {
 
   handle('generations:run', ({ nodeId, reuseSatisfied }) =>
     runEngine.runNode(nodeId, reuseSatisfied ?? false)
+  )
+  handle('generations:planRun', ({ videoId, targetNodeIds, reuseTargets }) =>
+    runBatchService.planBatch(videoId, targetNodeIds, reuseTargets)
+  )
+  // Resolves once the whole batch settled — the renderer's spinner awaits it.
+  handle(
+    'generations:runBatch',
+    ({ videoId, targetNodeIds, reuseTargets }) =>
+      runBatchService.startBatch({ videoId, targetNodeIds, reuseTargets }).done
   )
   handle('generations:refreshStatus', ({ nodeId }) => runEngine.refreshStatus(nodeId))
   handle('generations:cancel', ({ nodeId }) => runEngine.cancelGeneration(nodeId))
@@ -275,8 +297,10 @@ export function registerIpcHandlers(): void {
   handle('render:cancel', ({ videoId }) => renderService.cancelRender(videoId))
 
   handle('chat:get', ({ videoId }) => chatService.getChatState(videoId))
-  handle('chat:send', ({ videoId, projectId, text, images }) =>
-    chatService.sendChatMessage(videoId, projectId, text, images)
+  handle('chat:send', ({ videoId, projectId, text, images, context }) =>
+    chatService.sendChatMessage(videoId, projectId, text, images, context)
   )
   handle('chat:clear', ({ videoId }) => chatService.clearChat(videoId))
+  handle('chat:listSessions', () => chatService.listSessions())
+  handle('chat:listTools', () => chatService.listAssistantTools())
 }

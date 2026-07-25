@@ -15,7 +15,7 @@ import {
 import '@xyflow/react/dist/style.css'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { FocusNodePayload, GraphEdge, GraphNode } from '@shared/ipc/contracts'
+import type { FocusNodePayload, GraphNode } from '@shared/ipc/contracts'
 import { useConfirm, useToast } from '@renderer/components/feedback/Feedback'
 import { invoke } from '@renderer/lib/ipc'
 import { ModelNode, AssetNode } from './nodes/ModelNode'
@@ -23,18 +23,33 @@ import { NodeParamsPanel } from './NodeParamsPanel'
 import { useCollapsed } from './timelineHooks'
 import { TimelineV2 } from './TimelineV2'
 import { HistoryPanel } from './HistoryPanel'
-import { ChatPanel } from './ChatPanel'
-import { MessageSquare } from 'lucide-react'
+import {
+  Anchor,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  History,
+  Image as ImageIcon,
+  PanelBottom,
+  PanelBottomClose,
+  Play,
+  Replace,
+  Trash2
+} from 'lucide-react'
+import { useQueryClient } from '@tanstack/react-query'
 import { Button } from '@renderer/components/ui/Button'
 import { useAppMenus, useHeaderActions, type AppMenu } from '@renderer/components/menubar/MenuBar'
-import { WorkflowToolbar } from './Toolbar'
-import { RENDER_PRESETS, useWorkflowIO, type RenderPreset } from './useWorkflowIO'
-import { WorkflowGraphContext, type WorkflowGraph } from './workflowContext'
+import { openAssistant } from '@renderer/features/assistant/assistantStore'
+import { resetEditorContext, setEditorContext } from '@renderer/features/assistant/appContextStore'
+import { WorkflowToolbar, AddNodePanel } from './Toolbar'
+import { ExportDialog } from './ExportDialog'
+import { useWorkflowIO } from './useWorkflowIO'
+import { WorkflowGraphContext, edgeAliases, type WorkflowGraph } from './workflowContext'
 import { autoLayoutPositions, resolveOverlaps, type LayoutDirection } from './autoLayout'
 import { useLastFrameExtractor } from './useLastFrameExtractor'
 import { graphKeys, useGraph, useIpcMutation, useProjectAssets } from './data'
-import { runNode } from './generationRuntime'
-import { getModel } from '@shared/models'
+import { useNodeCreation } from './useNodeCreation'
+import { MODELS, getModel } from '@shared/models'
 
 const NODE_TYPES = {
   modelNode: ModelNode,
@@ -44,12 +59,44 @@ const NODE_TYPES = {
 /** "Don't ask again under X credits" — remembered locally on this machine. */
 const COST_SKIP_KEY = 'raccord.costConfirmSkipUnder'
 
+/**
+ * In-app clipboard for node copy/paste (§4.6) — a workflow-JSON v1 fragment,
+ * pasted through the importWorkflow validator with fresh keys and an offset.
+ * Module-level so it survives switching videos (paste across videos of the
+ * same project keeps working; asset references resolve project-wide).
+ */
+interface NodeClipboard {
+  nodes: {
+    key: string
+    modelId: string
+    label?: string
+    intent?: string
+    position: { x: number; y: number }
+    params: Record<string, unknown>
+  }[]
+  edges: { from: string; to: string; input: string; output: string }[]
+}
+let nodeClipboard: NodeClipboard | null = null
+
 interface CostPreviewState {
   rows: { id: string; label: string; credits: number | null }[]
   total: number
   /** Current kie.ai balance, null when unreachable (no key, offline). */
   balance: number | null
   resolve: (accepted: boolean) => void
+}
+
+/**
+ * Pending frame-anchor guard (§4.6): a design sheet is about to be wired to a
+ * frame anchor — the modal teaches the anchor/reference distinction and offers
+ * to rewire to the target's reference input when it has one.
+ */
+interface AnchorGuardState {
+  sourceLabel: string
+  anchorHandleLabel: string
+  /** Reference input available on the target model (null = none, no rewire CTA). */
+  referenceHandle: { key: string; label: string } | null
+  resolve: (choice: 'anchor' | 'reference' | 'cancel') => void
 }
 
 interface Props {
@@ -101,7 +148,16 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
     ['generations'],
     ['history']
   ])
-  const { fitView } = useReactFlow()
+  const { fitView, screenToFlowPosition } = useReactFlow()
+  const queryClient = useQueryClient()
+  const nodeCreation = useNodeCreation(videoId, projectId)
+  const { mutateAsync: createNodeAsync } = useIpcMutation('nodes:create', [
+    graphKeys.graph(videoId)
+  ])
+  const { mutateAsync: replaceModelAsync } = useIpcMutation('nodes:replaceModel', [
+    graphKeys.graph(videoId),
+    ['generations']
+  ])
 
   // Cmd/Ctrl+Z and Shift+Cmd/Ctrl+Z — skipped while typing in a field so text
   // editing keeps its native undo.
@@ -125,35 +181,31 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
 
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null)
   const [historyOpen, setHistoryOpen] = useState(false)
-  const [chatOpen, setChatOpen] = useState(false)
-  /** Draft injected into the chat input (e.g. "fix this failed prompt"). */
-  const [chatPrefill, setChatPrefill] = useState<string | null>(null)
+  /** "Fix with the assistant" buttons → global sidebar with a prepared draft. */
   const askAssistant = useCallback((text: string) => {
-    setChatPrefill(text)
-    setChatOpen(true)
+    openAssistant(text)
   }, [])
 
-  // Assistant toggle lives in the title bar, next to the settings gear.
-  useHeaderActions(
-    useMemo(
-      () => (
-        <Button
-          variant={chatOpen ? 'secondary' : 'ghost'}
-          size="sm"
-          onClick={() => setChatOpen((v) => !v)}
-          title={t('editor.assistantTitle')}
-        >
-          <MessageSquare className="h-3.5 w-3.5" /> {t('editor.assistant')}
-        </Button>
-      ),
-      [chatOpen, t]
-    )
-  )
+  // Feed the assistant's per-send <app-context> snapshot (§4.10 phase 2).
+  useEffect(() => {
+    setEditorContext({ selectedNodeId })
+  }, [selectedNodeId])
+  useEffect(() => resetEditorContext, [])
   const [timelineCollapsed, setTimelineCollapsed] = useCollapsed()
   /** True while a "generate all videos" batch run is in flight. */
   const [runningAll, setRunningAll] = useState(false)
   /** Pending cost-preview modal for a multi-node run (null = none). */
   const [costPreview, setCostPreview] = useState<CostPreviewState | null>(null)
+  /** Pending frame-anchor guard modal (null = none). */
+  const [anchorGuard, setAnchorGuard] = useState<AnchorGuardState | null>(null)
+  /** Pane right-click menu — add-node panel at the cursor (§4.6). */
+  const [paneMenu, setPaneMenu] = useState<{
+    x: number
+    y: number
+    flow: { x: number; y: number }
+  } | null>(null)
+  /** Node right-click menu — Run / Duplicate / Replace model / Delete (§4.6). */
+  const [nodeMenu, setNodeMenu] = useState<{ x: number; y: number; nodeId: string } | null>(null)
 
   // ── Local React Flow state, seeded from the store and reconciled on change ──
   // Local state lets React Flow update positions instantly during drag.
@@ -188,13 +240,28 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
 
   const serverEdges = useMemo(() => {
     if (!graph) return []
-    return graph.edges.map((e) => ({
-      id: e.id,
-      source: e.sourceNodeId,
-      target: e.targetNodeId,
-      sourceHandle: e.sourceHandle,
-      targetHandle: e.targetHandle
-    })) satisfies Edge[]
+    // @ImageN badge on the edge itself — the number the model sees is the
+    // number the user sees (same ordering as the chips and the run engine).
+    const aliases = edgeAliases(graph)
+    return graph.edges.map((e) => {
+      const alias = aliases.get(e.id)
+      return {
+        id: e.id,
+        source: e.sourceNodeId,
+        target: e.targetNodeId,
+        sourceHandle: e.sourceHandle,
+        targetHandle: e.targetHandle,
+        ...(alias
+          ? {
+              label: alias,
+              labelStyle: { fill: '#afdeff', fontSize: 10, fontFamily: 'monospace' },
+              labelBgStyle: { fill: '#171717', fillOpacity: 0.9 },
+              labelBgPadding: [4, 2] as [number, number],
+              labelBgBorderRadius: 4
+            }
+          : {})
+      }
+    }) satisfies Edge[]
   }, [graph])
 
   // Reconcile local nodes whenever the server pushes a fresh snapshot:
@@ -325,21 +392,32 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
           (source?.modelId === 'studio/asset' && sourceParams?.assetId
             ? (projectAssets?.find((a) => a.id === sourceParams.assetId)?.designId ?? undefined)
             : undefined)
+        let resolvedTargetHandle = targetHandle
         if (designId) {
           const target = graph?.nodes.find((n) => n.id === targetId)
-          const handle = target
-            ? getModel(target.modelId)?.inputs.find((h) => h.key === targetHandle)
-            : undefined
+          const targetModel = target ? getModel(target.modelId) : undefined
+          const handle = targetModel?.inputs.find((h) => h.key === targetHandle)
           if (handle?.frameAnchor) {
-            const accepted = await confirmModal({
-              title: t('editor.designFrameAnchorTitle'),
-              message: t('editor.designFrameAnchorConfirm', {
-                label: source?.label ?? source?.key ?? '',
-                handle: targetHandle
-              }),
-              confirmLabel: t('editor.designFrameAnchorConnect')
-            })
-            if (!accepted) return
+            // Styled two-column modal instead of a bare confirm: teaches the
+            // anchor/reference distinction and can rewire to a reference input.
+            const referenceInput = targetModel?.inputs.find(
+              (h) => !h.frameAnchor && h.referenceAlias && h.accepts.includes('image')
+            )
+            const choice = await new Promise<'anchor' | 'reference' | 'cancel'>((resolve) =>
+              setAnchorGuard({
+                sourceLabel: source?.label ?? source?.key ?? '',
+                anchorHandleLabel: handle.label,
+                referenceHandle: referenceInput
+                  ? { key: referenceInput.key, label: referenceInput.label }
+                  : null,
+                resolve
+              })
+            )
+            setAnchorGuard(null)
+            if (choice === 'cancel') return
+            if (choice === 'reference' && referenceInput) {
+              resolvedTargetHandle = referenceInput.key
+            }
           }
         }
         connectEdge({
@@ -347,11 +425,11 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
           sourceNodeId: sourceId,
           sourceHandle: connection.sourceHandle ?? 'output',
           targetNodeId: targetId,
-          targetHandle
+          targetHandle: resolvedTargetHandle
         })
       })()
     },
-    [connectEdge, videoId, graph, projectAssets, confirmModal, t]
+    [connectEdge, videoId, graph, projectAssets]
   )
 
   // ── Recenter the canvas on a single node ────────────────────────────────
@@ -373,6 +451,151 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
       if (p.videoId === videoId) focusNode(p.nodeId)
     })
   }, [videoId, focusNode])
+
+  // ── Canvas affordances (§4.6): duplicate, copy/paste, media drop ────────
+
+  /** Exact copy of a node (params/label/intent), offset so it doesn't stack. */
+  const duplicateNode = useCallback(
+    async (nodeId: string) => {
+      const node = graph?.nodes.find((n) => n.id === nodeId)
+      if (!node) return
+      await createNodeAsync({
+        videoId,
+        modelId: node.modelId,
+        position: { x: node.position.x + 48, y: node.position.y + 48 },
+        params: (node.params as Record<string, unknown> | null) ?? {},
+        label: node.label ?? undefined,
+        intent: node.intent ?? undefined
+      })
+    },
+    [graph, createNodeAsync, videoId]
+  )
+
+  /** Copy the selected nodes (and the edges between them) to the in-app clipboard. */
+  const copySelection = useCallback((): boolean => {
+    if (!graph) return false
+    const selectedIds = new Set(rfNodes.filter((n) => n.selected).map((n) => n.id))
+    if (selectedIds.size === 0) return false
+    const keyById = new Map(graph.nodes.map((n) => [n.id, n.key]))
+    const copied = graph.nodes.filter((n) => selectedIds.has(n.id))
+    nodeClipboard = {
+      nodes: copied.map((n) => ({
+        key: n.key,
+        modelId: n.modelId,
+        label: n.label ?? undefined,
+        intent: n.intent ?? undefined,
+        position: n.position,
+        params: (n.params as Record<string, unknown> | null) ?? {}
+      })),
+      edges: graph.edges
+        .filter((e) => selectedIds.has(e.sourceNodeId) && selectedIds.has(e.targetNodeId))
+        // Keep creation order so the @ numbering survives the round-trip.
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((e) => ({
+          from: keyById.get(e.sourceNodeId)!,
+          to: keyById.get(e.targetNodeId)!,
+          input: e.targetHandle,
+          output: e.sourceHandle
+        }))
+    }
+    toast.info(t('editor.copied', { count: copied.length }))
+    return true
+  }, [graph, rfNodes, toast, t])
+
+  /** Paste the clipboard fragment through the importWorkflow validator. */
+  const pasteClipboard = useCallback(async () => {
+    const clip = nodeClipboard
+    if (!clip || clip.nodes.length === 0) return
+    // Fresh keys so repeated pastes never collide with the originals.
+    const suffix = Math.random().toString(36).slice(2, 6)
+    const keyMap = new Map(clip.nodes.map((n) => [n.key, `${n.key}_${suffix}`]))
+    const fragment = {
+      version: 1,
+      assets: [],
+      nodes: clip.nodes.map((n) => ({
+        ...n,
+        key: keyMap.get(n.key)!,
+        position: { x: n.position.x + 48, y: n.position.y + 48 }
+      })),
+      edges: clip.edges.map((e) => ({ ...e, from: keyMap.get(e.from)!, to: keyMap.get(e.to)! }))
+    }
+    try {
+      const res = await invoke('workflow:import', {
+        videoId,
+        json: JSON.stringify(fragment),
+        replace: false
+      })
+      void queryClient.invalidateQueries({ queryKey: graphKeys.graph(videoId) })
+      toast.success(t('editor.pasted', { count: res.nodeCount }))
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : String(err))
+    }
+  }, [videoId, queryClient, toast, t])
+
+  // Cmd/Ctrl+C / Cmd/Ctrl+V on the canvas — skipped while typing and when the
+  // user is copying selected text (native copy keeps working).
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent): void {
+      if (!(e.metaKey || e.ctrlKey)) return
+      const key = e.key.toLowerCase()
+      if (key !== 'c' && key !== 'v') return
+      const target = e.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
+        return
+      }
+      if (key === 'c') {
+        if (window.getSelection()?.toString()) return
+        if (copySelection()) e.preventDefault()
+      } else {
+        e.preventDefault()
+        void pasteClipboard()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [copySelection, pasteClipboard])
+
+  /** Drop image/video/audio files on the canvas → import + asset node at the drop point. */
+  const handleCanvasDrop = useCallback(
+    async (e: React.DragEvent) => {
+      const files = Array.from(e.dataTransfer.files)
+      if (files.length === 0) return
+      e.preventDefault()
+      const flow = screenToFlowPosition({ x: e.clientX, y: e.clientY })
+      const paths = files
+        .map((f) => {
+          try {
+            return window.api.getPathForFile(f)
+          } catch {
+            return ''
+          }
+        })
+        .filter(Boolean)
+      if (paths.length === 0) return
+      try {
+        const imported = await invoke('assets:importFromPaths', { projectId, paths })
+        void queryClient.invalidateQueries({ queryKey: ['assets'] })
+        for (const [i, asset] of imported.entries()) {
+          await createNodeAsync({
+            videoId,
+            modelId: 'studio/asset',
+            position: { x: flow.x + i * 40, y: flow.y + i * 40 },
+            params: { assetId: asset.id },
+            label: asset.name
+          })
+        }
+        const skipped = paths.length - imported.length
+        if (skipped > 0) toast.warning(t('editor.dropSkipped', { count: skipped }))
+        else toast.success(t('editor.dropImported', { count: imported.length }))
+      } catch (err) {
+        toast.error(err instanceof Error ? err.message : String(err))
+      }
+    },
+    [projectId, videoId, screenToFlowPosition, createNodeAsync, queryClient, toast, t]
+  )
 
   // ── Auto-layout (Tidy) ──────────────────────────────────────────────────
   const handleTidy = useCallback(
@@ -400,148 +623,47 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
   )
 
   /**
-   * Smart per-node run: gathers every upstream dependency that lacks a usable
-   * output, then runs the whole subgraph dependency-aware. A node starts as soon
-   * as its OWN direct parents have finished — independent branches run in
-   * parallel (two images feeding the same node generate concurrently, they don't
-   * wait on each other). The explicit target always runs fresh; dependencies
-   * reuse any in-flight/finished generation (race-safe, server-side) so a shared
-   * upstream isn't generated once per consumer. Asset nodes are skipped.
+   * Smart per-node run — planned AND executed in the main process since §4.10
+   * phase 4 (`generations:planRun` / `generations:runBatch`): dependency-aware,
+   * shared upstreams generate once, independent branches in parallel, targets
+   * regenerate unless `reuseTargets` (batch mode). The renderer keeps exactly
+   * two concerns: the §4.4 cost gate (modal below) and failure feedback.
    */
   const runNodes = useCallback(
     async (targetNodeIds: string[], opts?: { reuseTargets?: boolean }) => {
-      if (!graph || targetNodeIds.length === 0) return
-      // When `reuseTargets` is set (batch runs), targets with a successful output
-      // are skipped instead of regenerated — no credits burned re-running clips
-      // that are already done. The single-node run leaves it false: an explicit
-      // click on one node always regenerates it.
+      if (targetNodeIds.length === 0) return
       const reuseTargets = opts?.reuseTargets ?? false
-      const targetSet = new Set<string>(targetNodeIds)
-      const nodesById = new Map<string, GraphNode>(graph.nodes.map((n) => [n.id, n]))
-      const incomingByNode = new Map<string, GraphEdge[]>()
-      for (const e of graph.edges) {
-        const arr = incomingByNode.get(e.targetNodeId) ?? []
-        arr.push(e)
-        incomingByNode.set(e.targetNodeId, arr)
-      }
+      const plan = await invoke('generations:planRun', { videoId, targetNodeIds, reuseTargets })
 
-      // Walk upstream from every target, collecting all transitive dependencies.
-      const visited = new Set<string>()
-      function visit(id: string) {
-        if (visited.has(id)) return
-        visited.add(id)
-        for (const e of incomingByNode.get(id) ?? []) visit(e.sourceNodeId)
-      }
-      for (const id of targetNodeIds) visit(id)
-
-      // ── Cost preview ──────────────────────────────────────────────────────
-      // Mirror of the reuse rules below: which nodes will actually claim a new
-      // generation. Multi-node runs get a per-node breakdown + total + balance
+      // Cost gate: multi-node runs get a per-node breakdown + total + balance
       // before any credit is spent; "don't ask under X" short-circuits it.
-      const planned: GraphNode[] = []
-      for (const id of visited) {
-        const node = nodesById.get(id)
-        if (!node || node.modelId === 'studio/asset') continue
-        const reuse = !targetSet.has(id) || reuseTargets
-        if (reuse && node.selectedGenerationId) {
-          const sel = await invoke('generations:get', {
-            generationId: node.selectedGenerationId
-          })
-          if (sel?.status === 'success') continue
-        }
-        planned.push(node)
-      }
-      if (planned.length >= 2) {
-        const rows = await Promise.all(
-          planned.map(async (node) => ({
-            id: node.id,
-            label: node.label ?? node.key,
-            credits: await invoke('generations:estimateCost', { nodeId: node.id })
-              .then((r) => r.credits)
-              .catch(() => null)
-          }))
-        )
-        const total = rows.reduce((sum, r) => sum + (r.credits ?? 0), 0)
+      if (plan.rows.length >= 2) {
         const skipUnder = Number(localStorage.getItem(COST_SKIP_KEY) ?? '0')
-        if (!(skipUnder > 0 && total <= skipUnder)) {
+        if (!(skipUnder > 0 && plan.total <= skipUnder)) {
           const balance = await invoke('kie:credits')
             .then((r) => r.credits)
             .catch(() => null)
           const accepted = await new Promise<boolean>((resolve) =>
-            setCostPreview({ rows, total, balance, resolve })
+            setCostPreview({
+              rows: plan.rows.map((r) => ({ id: r.nodeId, label: r.label, credits: r.credits })),
+              total: plan.total,
+              balance,
+              resolve
+            })
           )
           setCostPreview(null)
           if (!accepted) return
         }
       }
 
-      // Memoised per-node run: awaits the node's direct parents (in parallel),
-      // then runs it once. Memoising means a shared upstream is launched a single
-      // time even when several consumers depend on it; running parents via
-      // Promise.all is what parallelises independent branches. A single shared
-      // map across all targets means shared dependencies of two videos generate
-      // once, not once per video.
-      const runPromises = new Map<string, Promise<void>>()
-      const runWithDeps = (id: string): Promise<void> => {
-        const existing = runPromises.get(id)
-        if (existing) return existing
-        const node = nodesById.get(id)
-        const parentIds = (incomingByNode.get(id) ?? [])
-          .map((e) => e.sourceNodeId)
-          .filter((pid) => visited.has(pid))
-        const p = (async () => {
-          await Promise.all(parentIds.map(runWithDeps))
-          if (!node || node.modelId === 'studio/asset') return
-
-          // Dependencies always reuse; targets reuse only in batch mode.
-          const reuse = !targetSet.has(id) || reuseTargets
-          // Already-satisfied nodes are skipped (no churned credits).
-          if (reuse && node.selectedGenerationId) {
-            const sel = await invoke('generations:get', {
-              generationId: node.selectedGenerationId
-            })
-            if (sel?.status === 'success') return
-          }
-
-          const { generationId } = await runNode({
-            nodeId: id,
-            reuseSatisfied: reuse
-          })
-          await waitForGeneration(generationId)
-
-          const finished = await invoke('generations:get', { generationId })
-          if (finished?.status !== 'success') {
-            throw new Error(
-              `Node "${node.label ?? node.key}" did not complete successfully — stopping.`
-            )
-          }
-        })()
-        runPromises.set(id, p)
-        return p
-      }
-
-      // Run every target concurrently. One failing branch is surfaced but doesn't
-      // abort the others — the rest of the videos still get their shot.
-      let failedCount = 0
-      await Promise.all(
-        targetNodeIds.map((id) =>
-          runWithDeps(id).catch((err) => {
-            failedCount++
-            const message = err instanceof Error ? err.message : String(err)
-            console.error('Run failed:', message)
-            toast.error(message)
-          })
-        )
-      )
-      // One OS summary once the whole batch has settled ("4 succeeded, 1 failed").
-      if (targetNodeIds.length >= 2) {
-        void invoke('notifications:batchSummary', {
-          succeeded: targetNodeIds.length - failedCount,
-          failed: failedCount
-        }).catch(() => {})
+      const res = await invoke('generations:runBatch', { videoId, targetNodeIds, reuseTargets })
+      if (res.failed > 0) {
+        const message = t('editor.batchFailed', { count: res.failed })
+        setEditorContext({ lastError: message })
+        toast.error(message)
       }
     },
-    [graph, toast]
+    [videoId, toast, t]
   )
 
   const handleRunNode = useCallback((targetNodeId: string) => runNodes([targetNodeId]), [runNodes])
@@ -568,7 +690,9 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
   )
 
   // "Fichier" menu in the app menu bar — import/export live there, not in the toolbar.
+  // Export is a single entry opening the guided dialog (one card per format).
   const io = useWorkflowIO(videoId, graph?.nodes ?? [])
+  const [exportOpen, setExportOpen] = useState(false)
   const menus = useMemo<AppMenu[]>(
     () => [
       {
@@ -590,40 +714,10 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
             id: 'export',
             entries: [
               {
-                id: 'export-json',
-                label: io.exporting ? t('editor.exporting') : t('menu.exportWorkflow'),
-                onSelect: io.exportJson,
-                disabled: !io.canExport || io.exporting
-              },
-              {
-                id: 'export-fcpxml',
-                label: io.exportingZip ? t('editor.fcpxmlBundling') : t('menu.exportFcpxml'),
-                onSelect: io.exportFcpxmlZip,
-                disabled: !io.canExportFcpxml || io.exportingZip
-              },
-              {
-                id: 'export-media-zip',
-                label: io.exportingMedia ? t('editor.fcpxmlBundling') : t('menu.exportMediaZip'),
-                onSelect: io.exportMediaZip,
-                disabled: !io.canExportFcpxml || io.exportingMedia
-              },
-              {
-                id: 'export-mp4',
-                label: io.renderingMp4 ? t('editor.rendering') : t('menu.exportMp4'),
-                onSelect: () => io.exportMp4(),
-                disabled: !io.canExportFcpxml || io.renderingMp4
-              },
-              // Per-destination presets — fixed output dims via the render
-              // pipeline's resolution override (§4.5 follow-up).
-              ...(Object.keys(RENDER_PRESETS) as RenderPreset[]).map((preset) => ({
-                id: `export-mp4-${preset.replace(':', '-')}`,
-                label: t('menu.exportMp4Preset', {
-                  preset,
-                  dims: `${RENDER_PRESETS[preset].width}×${RENDER_PRESETS[preset].height}`
-                }),
-                onSelect: () => io.exportMp4(preset),
-                disabled: !io.canExportFcpxml || io.renderingMp4
-              }))
+                id: 'export-open',
+                label: t('menu.export'),
+                onSelect: () => setExportOpen(true)
+              }
             ]
           }
         ]
@@ -633,12 +727,46 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
   )
   useAppMenus(menus)
 
+  // Timeline / history toggles live in the title bar (icon-only, next to the
+  // assistant) — the floating toolbar stays lean enough for 13" screens.
+  const headerActions = useMemo(
+    () => (
+      <>
+        <Button
+          variant={timelineCollapsed ? 'ghost' : 'secondary'}
+          size="sm"
+          onClick={() => setTimelineCollapsed(!timelineCollapsed)}
+          title={timelineCollapsed ? t('editor.showTimeline') : t('editor.hideTimeline')}
+        >
+          {timelineCollapsed ? (
+            <PanelBottom className="h-4 w-4" />
+          ) : (
+            <PanelBottomClose className="h-4 w-4" />
+          )}
+        </Button>
+        <Button
+          variant={historyOpen ? 'secondary' : 'ghost'}
+          size="sm"
+          onClick={() => setHistoryOpen((v) => !v)}
+          title={t('editor.historyBtnTitle')}
+        >
+          <History className="h-4 w-4" />
+        </Button>
+      </>
+    ),
+    [t, timelineCollapsed, setTimelineCollapsed, historyOpen]
+  )
+  useHeaderActions(headerActions)
+
   // Keep the ref in sync so node data callbacks always invoke the latest handler.
   useEffect(() => {
     handleRunNodeRef.current = handleRunNode
   }, [handleRunNode])
 
   const graphValue: WorkflowGraph = graph ?? { nodes: [], edges: [] }
+  const contextNode = nodeMenu
+    ? (graphValue.nodes.find((n) => n.id === nodeMenu.nodeId) ?? null)
+    : null
 
   return (
     <WorkflowGraphContext.Provider value={graphValue}>
@@ -647,7 +775,16 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
           INSIDE the canvas island. */}
       <div className="flex h-full flex-col gap-3 p-3">
         <div className="island relative min-h-0 flex-1 overflow-hidden">
-          <div className="absolute inset-0">
+          <div
+            className="absolute inset-0"
+            onDragOver={(e) => {
+              if (e.dataTransfer.types.includes('Files')) {
+                e.preventDefault()
+                e.dataTransfer.dropEffect = 'copy'
+              }
+            }}
+            onDrop={(e) => void handleCanvasDrop(e)}
+          >
             <ReactFlow
               nodes={rfNodes}
               edges={rfEdges}
@@ -656,7 +793,26 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
               onEdgesChange={onEdgesChange}
               onConnect={onConnect}
               onNodeClick={(_, node) => setSelectedNodeId(node.id)}
-              onPaneClick={() => setSelectedNodeId(null)}
+              onPaneClick={() => {
+                setSelectedNodeId(null)
+                setPaneMenu(null)
+                setNodeMenu(null)
+              }}
+              onPaneContextMenu={(e) => {
+                e.preventDefault()
+                setNodeMenu(null)
+                const { clientX, clientY } = e as React.MouseEvent
+                setPaneMenu({
+                  x: clientX,
+                  y: clientY,
+                  flow: screenToFlowPosition({ x: clientX, y: clientY })
+                })
+              }}
+              onNodeContextMenu={(e, node) => {
+                e.preventDefault()
+                setPaneMenu(null)
+                setNodeMenu({ x: e.clientX, y: e.clientY, nodeId: node.id })
+              }}
               fitView
               minZoom={0.2}
               maxZoom={1.5}
@@ -682,27 +838,11 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
               graph={graphValue}
               onTidy={handleTidy}
               onFit={() => fitView({ padding: 0.2, duration: 300 })}
-              timelineCollapsed={timelineCollapsed}
-              onToggleTimeline={() => setTimelineCollapsed(!timelineCollapsed)}
-              historyOpen={historyOpen}
-              onToggleHistory={() => setHistoryOpen((v) => !v)}
               onRunAllVideos={handleRunAllVideos}
               runningAllVideos={runningAll}
               videoNodeCount={videoNodeCount}
             />
           </div>
-
-          {chatOpen && (
-            <div className="absolute top-16 bottom-3 left-3 z-30 flex flex-col items-stretch">
-              <ChatPanel
-                videoId={videoId}
-                projectId={projectId}
-                prefill={chatPrefill}
-                onPrefillConsumed={() => setChatPrefill(null)}
-                onClose={() => setChatOpen(false)}
-              />
-            </div>
-          )}
 
           {/* Also shown for renders launched by an agent through MCP — progress
               events arrive regardless of who started the render. */}
@@ -771,6 +911,82 @@ function WorkflowEditorInner({ videoId, projectId }: Props) {
       </div>
 
       {costPreview && <CostPreviewModal preview={costPreview} />}
+      {anchorGuard && <FrameAnchorModal guard={anchorGuard} />}
+
+      {/* Pane right-click: the add-node catalogue at the cursor, spawning at the click point. */}
+      {paneMenu && (
+        <>
+          <div
+            className="fixed inset-0 z-40"
+            onClick={() => setPaneMenu(null)}
+            onContextMenu={(e) => {
+              e.preventDefault()
+              setPaneMenu(null)
+            }}
+          />
+          <div
+            className="fixed z-50"
+            style={{
+              left: Math.min(paneMenu.x, window.innerWidth - 340),
+              top: Math.min(paneMenu.y, window.innerHeight - 440)
+            }}
+          >
+            <AddNodePanel
+              onAdd={(modelId) => {
+                void nodeCreation.addNode(modelId, paneMenu.flow)
+                setPaneMenu(null)
+              }}
+              onAddDesign={(recipeId, description) => {
+                void nodeCreation.addDesignNode(recipeId, description, paneMenu.flow)
+                setPaneMenu(null)
+              }}
+              libraryAssets={nodeCreation.designAssets}
+              onAddFromLibrary={(asset) => {
+                void nodeCreation.addLibraryDesignNode(asset, paneMenu.flow)
+                setPaneMenu(null)
+              }}
+              onClose={() => setPaneMenu(null)}
+            />
+          </div>
+        </>
+      )}
+
+      {/* Node right-click: the header-icon actions, reachable without aiming. */}
+      {nodeMenu && contextNode && (
+        <NodeContextMenu
+          x={nodeMenu.x}
+          y={nodeMenu.y}
+          node={contextNode}
+          onClose={() => setNodeMenu(null)}
+          onRun={() => void handleRunNode(contextNode.id)}
+          onDuplicate={() => void duplicateNode(contextNode.id)}
+          onReplace={(modelId) => {
+            void (async () => {
+              const accepted = await confirmModal({
+                title: t('editor.replaceModelTitle'),
+                message: t('editor.replaceModelConfirm', {
+                  label: getModel(modelId)?.label ?? modelId
+                })
+              })
+              if (accepted) await replaceModelAsync({ nodeId: contextNode.id, modelId })
+            })()
+          }}
+          onDelete={() => {
+            void (async () => {
+              const accepted = await confirmModal({
+                message: t('editor.deleteNodeNamedConfirm', {
+                  label:
+                    contextNode.label ?? getModel(contextNode.modelId)?.label ?? contextNode.modelId
+                }),
+                confirmLabel: t('library.delete'),
+                danger: true
+              })
+              if (accepted) removeNode({ nodeId: contextNode.id })
+            })()
+          }}
+        />
+      )}
+      {exportOpen && <ExportDialog io={io} onClose={() => setExportOpen(false)} />}
     </WorkflowGraphContext.Provider>
   )
 }
@@ -855,15 +1071,172 @@ function CostPreviewModal({ preview }: { preview: CostPreviewState }) {
 }
 
 /**
- * Step-by-step sequencer helper: polls the generation row and resolves as soon
- * as it reaches a terminal state (success/failed). Hard caps at 10 min.
+ * Node right-click menu (§4.6): the same actions as the node header icons —
+ * Run / Duplicate / Replace model / Delete — reachable from anywhere on the
+ * node. Asset nodes only get Duplicate and Delete.
  */
-async function waitForGeneration(generationId: string): Promise<void> {
-  const start = Date.now()
-  for (;;) {
-    const gen = await invoke('generations:get', { generationId })
-    if (gen?.status === 'success' || gen?.status === 'failed') return
-    if (Date.now() - start > 10 * 60 * 1000) return
-    await new Promise((resolve) => setTimeout(resolve, 2000))
-  }
+function NodeContextMenu({
+  x,
+  y,
+  node,
+  onClose,
+  onRun,
+  onDuplicate,
+  onReplace,
+  onDelete
+}: {
+  x: number
+  y: number
+  node: GraphNode
+  onClose: () => void
+  onRun: () => void
+  onDuplicate: () => void
+  onReplace: (modelId: string) => void
+  onDelete: () => void
+}) {
+  const { t } = useTranslation()
+  const [replaceOpen, setReplaceOpen] = useState(false)
+  const model = getModel(node.modelId)
+  const isAsset = node.modelId === 'studio/asset'
+  const targets = model ? MODELS.filter((m) => m.kind === model.kind && m.id !== model.id) : []
+  const itemClass =
+    'flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-neutral-200 hover:bg-neutral-800'
+  return (
+    <>
+      <div
+        className="fixed inset-0 z-40"
+        onClick={onClose}
+        onContextMenu={(e) => {
+          e.preventDefault()
+          onClose()
+        }}
+      />
+      <div
+        className="fixed z-50 w-60 overflow-hidden rounded-md border border-neutral-800 bg-neutral-900 py-1 shadow-xl"
+        style={{
+          left: Math.min(x, window.innerWidth - 260),
+          top: Math.min(y, window.innerHeight - 240)
+        }}
+      >
+        <div className="truncate border-b border-neutral-800 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-neutral-500">
+          {node.label ?? model?.label ?? node.modelId}
+        </div>
+        {!isAsset && (
+          <button
+            className={itemClass}
+            onClick={() => {
+              onRun()
+              onClose()
+            }}
+          >
+            <Play className="h-3.5 w-3.5 text-accent" /> {t('editor.ctxRun')}
+          </button>
+        )}
+        <button
+          className={itemClass}
+          onClick={() => {
+            onDuplicate()
+            onClose()
+          }}
+        >
+          <Copy className="h-3.5 w-3.5 text-neutral-400" /> {t('editor.ctxDuplicate')}
+        </button>
+        {!isAsset && targets.length > 0 && (
+          <>
+            <button className={itemClass} onClick={() => setReplaceOpen((v) => !v)}>
+              <Replace className="h-3.5 w-3.5 text-neutral-400" /> {t('editor.ctxReplaceModel')}
+              {replaceOpen ? (
+                <ChevronDown className="ml-auto h-3 w-3 text-neutral-500" />
+              ) : (
+                <ChevronRight className="ml-auto h-3 w-3 text-neutral-500" />
+              )}
+            </button>
+            {replaceOpen &&
+              targets.map((m) => (
+                <button
+                  key={m.id}
+                  className={`${itemClass} pl-9 text-neutral-300`}
+                  onClick={() => {
+                    onReplace(m.id)
+                    onClose()
+                  }}
+                >
+                  {m.label}
+                </button>
+              ))}
+          </>
+        )}
+        <button
+          className={`${itemClass} hover:text-danger`}
+          onClick={() => {
+            onDelete()
+            onClose()
+          }}
+        >
+          <Trash2 className="h-3.5 w-3.5" /> {t('editor.ctxDelete')}
+        </button>
+      </div>
+    </>
+  )
+}
+
+/**
+ * Frame-anchor guard (§4.6): a design sheet is being wired to a frame anchor.
+ * Two illustrated columns make the semantics legible — anchors put the image
+ * ON SCREEN, references only guide — with a one-click rewire to the target's
+ * reference input when the model has one.
+ */
+function FrameAnchorModal({ guard }: { guard: AnchorGuardState }) {
+  const { t } = useTranslation()
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-6"
+      onClick={() => guard.resolve('cancel')}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="island w-full max-w-lg px-5 py-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <h2 className="text-sm font-semibold text-neutral-100">
+          {t('editor.anchorGuard.title', { label: guard.sourceLabel })}
+        </h2>
+        <p className="mt-1 text-xs leading-relaxed text-neutral-400">
+          {t('editor.anchorGuard.intro', { handle: guard.anchorHandleLabel })}
+        </p>
+        <div className="mt-3 grid grid-cols-2 gap-3">
+          <div className="rounded-md border border-warning/40 bg-warning/5 p-3">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-warning">
+              <Anchor className="h-3.5 w-3.5" /> {t('editor.anchorGuard.anchorTitle')}
+            </div>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-neutral-300">
+              {t('editor.anchorGuard.anchorDesc')}
+            </p>
+          </div>
+          <div className="rounded-md border border-accent-soft/40 bg-accent-soft/5 p-3">
+            <div className="flex items-center gap-1.5 text-xs font-semibold text-accent-soft">
+              <ImageIcon className="h-3.5 w-3.5" /> {t('editor.anchorGuard.referenceTitle')}
+            </div>
+            <p className="mt-1.5 text-[11px] leading-relaxed text-neutral-300">
+              {t('editor.anchorGuard.referenceDesc')}
+            </p>
+          </div>
+        </div>
+        <div className="mt-4 flex flex-wrap justify-end gap-2">
+          <Button variant="ghost" onClick={() => guard.resolve('cancel')}>
+            {t('common.cancel')}
+          </Button>
+          <Button variant="secondary" onClick={() => guard.resolve('anchor')}>
+            {t('editor.anchorGuard.connectAnchor')}
+          </Button>
+          {guard.referenceHandle && (
+            <Button variant="primary" onClick={() => guard.resolve('reference')} autoFocus>
+              {t('editor.anchorGuard.wireAsReference', { handle: guard.referenceHandle.label })}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
 }

@@ -1,11 +1,32 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { Check, Eraser, MessageSquare, Paperclip, Send, Wrench, X } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import {
+  AlertTriangle,
+  Check,
+  ClipboardList,
+  Eraser,
+  FileImage,
+  Folder,
+  MessageSquare,
+  Paperclip,
+  PenTool,
+  Send,
+  SquareSlash,
+  Wrench,
+  X
+} from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useTranslation } from 'react-i18next'
-import type { ChatImage, ChatItem } from '@shared/ipc/contracts'
+import type { AppContext, ChatImage, ChatItem, ChatPlan } from '@shared/ipc/contracts'
+import { Button } from '@renderer/components/ui/Button'
 import { useToast } from '@renderer/components/feedback/Feedback'
+import { MentionMenu, useMentionMenu, type MentionItem } from '@renderer/components/ui/MentionMenu'
 import { ASSISTANT_MODEL_SHORT } from '@renderer/features/settings/AssistantModelSwitcher'
 import { invoke } from '@renderer/lib/ipc'
+import type { MentionToken } from '@renderer/lib/mentionToken'
+
+/** "/" opens the assistant's action list (only as the first character);
+ *  "@" mentions a project or a library reference. */
+const CHAT_TRIGGERS = [{ char: '/', startOnly: true }, { char: '@' }]
 
 const MAX_ATTACHMENTS = 4
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -18,9 +39,9 @@ function dataUrlToChatImage(dataUrl: string): ChatImage | null {
 }
 
 /**
- * Assistant island — a Claude-style conversation that drives the workflow
- * through the main-process agentic loop (claude-opus-4-8 + graph tools).
- * Stacked on the LEFT of the canvas; tool calls render as compact chips.
+ * Assistant conversation — Claude-style transcript driving the app through
+ * the main-process agentic loop (claude-opus-4-8 + graph tools). Hosted by
+ * the global AssistantSidebar; tool calls render as compact chips.
  */
 export function ChatPanel({
   videoId,
@@ -28,6 +49,7 @@ export function ChatPanel({
   emptyText,
   prefill,
   onPrefillConsumed,
+  getContext,
   onClose
 }: {
   videoId: string
@@ -38,6 +60,8 @@ export function ChatPanel({
   /** Draft injected into the input (e.g. "fix this failed prompt" buttons). */
   prefill?: string | null
   onPrefillConsumed?: () => void
+  /** Snapshot of what the user is looking at, attached to each send (§4.10). */
+  getContext?: () => AppContext | undefined
   onClose: () => void
 }): React.JSX.Element {
   const { t } = useTranslation()
@@ -50,6 +74,9 @@ export function ChatPanel({
   const [attachments, setAttachments] = useState<string[]>([])
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
+  /** Caret position in the input — drives the "/" and "@" autocomplete. */
+  const [caret, setCaret] = useState(0)
 
   async function addFiles(files: FileList | null): Promise<void> {
     if (!files) return
@@ -83,6 +110,79 @@ export function ChatPanel({
     queryFn: () => invoke('chat:get', { videoId })
   })
 
+  // ── "/" actions and "@" mentions ──────────────────────────────────────────
+  const tools = useQuery({
+    queryKey: ['chat', 'tools'],
+    queryFn: () => invoke('chat:listTools'),
+    staleTime: Infinity
+  })
+  const projects = useQuery({
+    queryKey: ['projects'],
+    queryFn: () => invoke('projects:list')
+  })
+  // References come from the project the user is looking at (falls back to the
+  // session's own project for legacy per-video threads).
+  const mentionProjectId = getContext?.()?.projectId ?? (projectId || undefined)
+  const mentionAssets = useQuery({
+    queryKey: ['assets', 'mention', mentionProjectId],
+    queryFn: () => invoke('assets:listByProject', { projectId: mentionProjectId as string }),
+    enabled: mentionProjectId !== undefined
+  })
+
+  const itemsFor = useCallback(
+    (token: MentionToken): MentionItem[] => {
+      if (token.char === '/') {
+        return (tools.data ?? []).map((tool) => ({
+          id: `tool:${tool.name}`,
+          label: tool.name,
+          description: tool.description,
+          insert: `/${tool.name}`,
+          section: t('chat.menuActions'),
+          icon: <SquareSlash className="h-3.5 w-3.5 text-accent-soft" />
+        }))
+      }
+      // Design sheets first: they are the references worth @-mentioning.
+      const assets = [...(mentionAssets.data ?? [])].sort(
+        (a, b) => Number(b.designId !== null) - Number(a.designId !== null)
+      )
+      return [
+        ...(projects.data ?? []).map((project) => ({
+          id: `project:${project.id}`,
+          label: project.name,
+          insert: `@${project.name}`,
+          section: t('chat.menuProjects'),
+          icon: <Folder className="h-3.5 w-3.5 text-accent" />
+        })),
+        ...assets.map((asset) => ({
+          id: `asset:${asset.id}`,
+          label: asset.name,
+          description: asset.designId
+            ? `${t(`designs.${asset.designId}.name` as never)}${asset.designSubject ? ` — ${asset.designSubject}` : ''}`
+            : asset.tags.join(', ') || undefined,
+          insert: `@${asset.name}`,
+          section: t('chat.menuReferences'),
+          icon: asset.designId ? (
+            <PenTool className="h-3.5 w-3.5 text-highlight" />
+          ) : (
+            <FileImage className="h-3.5 w-3.5 text-accent-soft" />
+          )
+        }))
+      ]
+    },
+    [tools.data, projects.data, mentionAssets.data, t]
+  )
+  const mention = useMentionMenu({ value: draft, caret, triggers: CHAT_TRIGGERS, itemsFor })
+
+  /** Apply a mention pick: replace the token, restore focus and caret. */
+  function applyMentionResult(result: { value: string; caret: number }): void {
+    setDraft(result.value)
+    setCaret(result.caret)
+    requestAnimationFrame(() => {
+      inputRef.current?.focus()
+      inputRef.current?.setSelectionRange(result.caret, result.caret)
+    })
+  }
+
   // Live updates pushed by the main process while the loop runs.
   useEffect(() => {
     return window.api.on('event:chatUpdate', (payload) => {
@@ -92,10 +192,10 @@ export function ChatPanel({
     })
   }, [videoId, queryClient])
 
-  // Keep the transcript pinned to the bottom.
+  // Keep the transcript pinned to the bottom (streaming text included).
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [chat.data?.items.length, chat.data?.busy])
+  }, [chat.data?.items.length, chat.data?.busy, chat.data?.partialText])
 
   // A new prepared draft while the panel is already open replaces the input.
   useEffect(() => {
@@ -108,7 +208,8 @@ export function ChatPanel({
         videoId,
         projectId,
         text: args.text,
-        images: args.images.length > 0 ? args.images : undefined
+        images: args.images.length > 0 ? args.images : undefined,
+        context: getContext?.()
       }),
     onSettled: () => void queryClient.invalidateQueries({ queryKey: ['chat', videoId] })
   })
@@ -129,7 +230,7 @@ export function ChatPanel({
   }
 
   return (
-    <aside className="island flex min-h-0 w-96 flex-1 flex-shrink-0 flex-col overflow-hidden">
+    <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
       <div className="flex items-center justify-between border-b border-neutral-800 px-3 py-2">
         <h2 className="flex items-center gap-1.5 text-sm font-semibold text-neutral-100">
           <MessageSquare className="h-3.5 w-3.5 text-accent" /> {t('chat.title')}
@@ -163,14 +264,43 @@ export function ChatPanel({
           </p>
         )}
         {chat.data?.items.map((item, i) => (
-          <ChatItemView key={i} item={item} />
+          <ChatItemView
+            key={i}
+            item={item}
+            // Only the latest approval card (plan or destructive action) with
+            // no user reply after it is actionable — approving a stale card
+            // out of order would desync the conversation.
+            cardActive={i === activeCardIndex(chat.data?.items ?? []) && !busy}
+            onApprove={() => {
+              if (busy || !hasKey) return
+              send.mutate({
+                text: t(
+                  item.type === 'action' ? 'chat.actionApproveMessage' : 'chat.planApproveMessage'
+                ),
+                images: []
+              })
+            }}
+            onRequestChanges={() =>
+              setDraft(
+                t(item.type === 'action' ? 'chat.actionChangesPrefill' : 'chat.planChangesPrefill')
+              )
+            }
+          />
         ))}
-        {busy && (
-          <div className="flex items-center gap-2 px-1 text-xs text-neutral-500">
-            <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-            {t('chat.thinking')}
-          </div>
-        )}
+        {busy &&
+          (chat.data?.partialText ? (
+            // Streaming turn (§4.10 phase 6): the text grows in place, then the
+            // finished transcript item replaces it.
+            <div className="px-1 text-sm leading-relaxed whitespace-pre-wrap text-neutral-200">
+              {chat.data.partialText}
+              <span className="ml-0.5 inline-block h-3.5 w-1.5 animate-pulse rounded-sm bg-accent align-middle" />
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 px-1 text-xs text-neutral-500">
+              <span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+              {t('chat.thinking')}
+            </div>
+          ))}
         {chat.data?.error && (
           <p className="rounded-md bg-danger/10 px-2.5 py-1.5 text-xs text-danger">
             {chat.data.error}
@@ -201,21 +331,42 @@ export function ChatPanel({
                 ))}
               </div>
             )}
-            <textarea
-              rows={Math.min(8, Math.max(2, draft.split('\n').length))}
-              placeholder={t('chat.placeholder')}
-              value={draft}
-              disabled={busy}
-              onChange={(event) => setDraft(event.target.value)}
-              onPaste={(event) => void addFiles(event.clipboardData?.files ?? null)}
-              onKeyDown={(event) => {
-                if (event.key === 'Enter' && !event.shiftKey) {
-                  event.preventDefault()
-                  submit()
-                }
-              }}
-              className="max-h-56 w-full resize-none rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-200 placeholder:text-neutral-600 focus:border-accent focus:outline-none disabled:opacity-60"
-            />
+            <div className="relative">
+              {mention.open && (
+                <div className="absolute inset-x-0 bottom-full z-30 mb-1">
+                  <MentionMenu
+                    items={mention.items}
+                    active={mention.active}
+                    onHover={mention.setActive}
+                    onPick={(item) => {
+                      const result = mention.select(item)
+                      if (result) applyMentionResult(result)
+                    }}
+                  />
+                </div>
+              )}
+              <textarea
+                ref={inputRef}
+                rows={Math.min(8, Math.max(2, draft.split('\n').length))}
+                placeholder={t('chat.placeholder')}
+                value={draft}
+                disabled={busy}
+                onChange={(event) => {
+                  setDraft(event.target.value)
+                  setCaret(event.target.selectionStart ?? event.target.value.length)
+                }}
+                onSelect={(event) => setCaret(event.currentTarget.selectionStart ?? 0)}
+                onPaste={(event) => void addFiles(event.clipboardData?.files ?? null)}
+                onKeyDown={(event) => {
+                  if (mention.onKeyDown(event, applyMentionResult)) return
+                  if (event.key === 'Enter' && !event.shiftKey) {
+                    event.preventDefault()
+                    submit()
+                  }
+                }}
+                className="max-h-56 w-full resize-none rounded-lg border border-neutral-800 bg-neutral-900 px-3 py-2 text-sm text-neutral-200 placeholder:text-neutral-600 focus:border-accent focus:outline-none disabled:opacity-60"
+              />
+            </div>
             <div className="flex items-center justify-between">
               <input
                 ref={fileInputRef}
@@ -251,11 +402,55 @@ export function ChatPanel({
           </div>
         )}
       </div>
-    </aside>
+    </div>
   )
 }
 
-function ChatItemView({ item }: { item: ChatItem }): React.JSX.Element {
+/**
+ * Latest approval card (plan or destructive action) still awaiting a user
+ * reply — the only one whose buttons are enabled.
+ */
+function activeCardIndex(items: ChatItem[]): number {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const type = items[i]!.type
+    if (type === 'user') return -1
+    if (type === 'plan' || type === 'action') return i
+  }
+  return -1
+}
+
+function ChatItemView({
+  item,
+  cardActive,
+  onApprove,
+  onRequestChanges
+}: {
+  item: ChatItem
+  /** True when this is the pending approval card — its buttons are enabled. */
+  cardActive?: boolean
+  onApprove?: () => void
+  onRequestChanges?: () => void
+}): React.JSX.Element {
+  if (item.type === 'plan') {
+    return (
+      <PlanCard
+        plan={item.plan}
+        active={cardActive ?? false}
+        onApprove={onApprove}
+        onRequestChanges={onRequestChanges}
+      />
+    )
+  }
+  if (item.type === 'action') {
+    return (
+      <ActionCard
+        label={item.label}
+        active={cardActive ?? false}
+        onApprove={onApprove}
+        onRequestChanges={onRequestChanges}
+      />
+    )
+  }
   if (item.type === 'user') {
     return (
       <div className="ml-6 flex flex-col items-end gap-1.5 self-end">
@@ -294,6 +489,118 @@ function ChatItemView({ item }: { item: ChatItem }): React.JSX.Element {
     >
       {item.ok ? <Check className="h-3 w-3" /> : <Wrench className="h-3 w-3" />}
       <span className="truncate">{item.label}</span>
+    </div>
+  )
+}
+
+/**
+ * Destructive-approval card (§4.10 phase 3): a destructive tool was called
+ * without confirm — nothing executed. Approve / Request changes post back as
+ * user messages; on approval the model re-calls the tool with confirm: true.
+ */
+function ActionCard({
+  label,
+  active,
+  onApprove,
+  onRequestChanges
+}: {
+  label: string
+  active: boolean
+  onApprove?: () => void
+  onRequestChanges?: () => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <div className="rounded-lg border border-warning/40 bg-warning/5 p-3">
+      <div className="flex items-center gap-1.5 text-xs font-semibold text-warning">
+        <AlertTriangle className="h-3.5 w-3.5" />
+        {t('chat.actionTitle')}
+      </div>
+      <p className="mt-1.5 text-sm text-neutral-200">{label}</p>
+      {active && (
+        <div className="mt-2.5 flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={onRequestChanges}>
+            {t('chat.plan.requestChanges')}
+          </Button>
+          <Button variant="primary" size="sm" onClick={onApprove}>
+            <Check className="h-3.5 w-3.5" /> {t('chat.plan.approve')}
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Structured plan presented by the assistant (§4.7): per-shot model + cost,
+ * grand total, Approve / Request changes posting back as user messages. The
+ * card persists in the transcript like tool chips do; only the latest one is
+ * actionable.
+ */
+function PlanCard({
+  plan,
+  active,
+  onApprove,
+  onRequestChanges
+}: {
+  plan: ChatPlan
+  active: boolean
+  onApprove?: () => void
+  onRequestChanges?: () => void
+}): React.JSX.Element {
+  const { t } = useTranslation()
+  return (
+    <div className="rounded-lg border border-accent/30 bg-accent/5 p-3">
+      <div className="flex items-center gap-1.5 text-xs font-semibold text-accent-soft">
+        <ClipboardList className="h-3.5 w-3.5" />
+        {t('chat.plan.title', { count: plan.shots.length })}
+        {plan.style && (
+          <span className="ml-auto rounded bg-accent/15 px-1.5 py-0.5 text-[9px] font-medium">
+            {plan.style}
+          </span>
+        )}
+      </div>
+      <ul className="mt-2 space-y-1.5">
+        {plan.shots.map((shot, i) => (
+          <li key={i} className="rounded-md bg-neutral-900/60 px-2 py-1.5">
+            <div className="flex items-baseline justify-between gap-2 text-[11px]">
+              <span className="min-w-0 flex-1 truncate font-medium text-neutral-100">
+                {shot.label}
+              </span>
+              <span className="flex-shrink-0 font-mono text-[10px] text-neutral-400">
+                {shot.estCredits !== null
+                  ? t('chat.plan.credits', { credits: shot.estCredits })
+                  : '—'}
+              </span>
+            </div>
+            <div className="mt-0.5 text-[10px] leading-snug text-neutral-400">
+              {shot.description}
+            </div>
+            <div className="mt-0.5 flex items-center gap-2 font-mono text-[9px] text-neutral-600">
+              {shot.modelId}
+              {shot.panels && <span>· {t('chat.plan.panels', { panels: shot.panels })}</span>}
+            </div>
+          </li>
+        ))}
+      </ul>
+      {plan.totalCredits !== null && (
+        <div className="mt-2 flex items-baseline justify-between border-t border-neutral-800 pt-1.5 text-[11px]">
+          <span className="font-semibold text-neutral-200">{t('chat.plan.total')}</span>
+          <span className="font-mono font-semibold text-neutral-100">
+            {t('chat.plan.credits', { credits: plan.totalCredits })}
+          </span>
+        </div>
+      )}
+      {active && (
+        <div className="mt-2.5 flex justify-end gap-2">
+          <Button variant="ghost" size="sm" onClick={onRequestChanges}>
+            {t('chat.plan.requestChanges')}
+          </Button>
+          <Button variant="primary" size="sm" onClick={onApprove}>
+            <Check className="h-3.5 w-3.5" /> {t('chat.plan.approve')}
+          </Button>
+        </div>
+      )}
     </div>
   )
 }

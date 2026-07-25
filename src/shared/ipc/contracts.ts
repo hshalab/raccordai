@@ -201,6 +201,45 @@ export const workflowExportSchema = z.object({
 })
 export type WorkflowExport = z.infer<typeof workflowExportSchema>
 
+/**
+ * A structured production plan presented by the assistant before building or
+ * running (§4.7): per-shot model + estimated cost, rendered as an approval
+ * card in the chat panel.
+ */
+export const chatPlanSchema = z.object({
+  shots: z.array(
+    z.object({
+      label: z.string(),
+      description: z.string(),
+      modelId: z.string(),
+      estCredits: z.number().nullable(),
+      /** Storyboard panels this shot covers (e.g. "1-3"), when relevant. */
+      panels: z.string().optional()
+    })
+  ),
+  /** Style template id or label the plan commits to, when one was chosen. */
+  style: z.string().nullable(),
+  totalCredits: z.number().nullable()
+})
+export type ChatPlan = z.infer<typeof chatPlanSchema>
+
+/**
+ * Snapshot of what the user is looking at, attached to a chat send (§4.10
+ * phase 2). All-optional: the renderer fills what it cheaply knows; the chat
+ * service renders it as an <app-context> block for the model (never shown in
+ * the transcript).
+ */
+export const appContextSchema = z.object({
+  route: z.string().optional(),
+  projectId: z.string().optional(),
+  videoId: z.string().optional(),
+  selectedNodeId: z.string().optional(),
+  selectedGenerationId: z.string().optional(),
+  /** Last generation error surfaced to the user (toast), if any. */
+  lastError: z.string().optional()
+})
+export type AppContext = z.infer<typeof appContextSchema>
+
 /** An image attached to a chat message (base64, no data: prefix). */
 export const chatImageSchema = z.object({
   mediaType: z.enum(['image/png', 'image/jpeg', 'image/webp', 'image/gif']),
@@ -222,14 +261,20 @@ export const chatItemSchema = z.discriminatedUnion('type', [
     name: z.string(),
     label: z.string(),
     ok: z.boolean()
-  })
+  }),
+  z.object({ type: z.literal('plan'), plan: chatPlanSchema }),
+  /** Destructive-approval action card (§4.10 phase 3): shown when a destructive
+   *  tool was called without confirm — Approve / Request changes post back. */
+  z.object({ type: z.literal('action'), name: z.string(), label: z.string() })
 ])
 export type ChatItem = z.infer<typeof chatItemSchema>
 
 export const chatStateSchema = z.object({
   items: z.array(chatItemSchema),
   busy: z.boolean(),
-  error: z.string().nullable()
+  error: z.string().nullable(),
+  /** Streaming text of the in-flight assistant turn (§4.10 phase 6). */
+  partialText: z.string().nullable()
 })
 export type ChatState = z.infer<typeof chatStateSchema>
 
@@ -327,6 +372,15 @@ export const ipcContracts = {
     input: z.object({ projectId: z.string() }),
     output: z.array(assetWithUrlSchema)
   },
+  /**
+   * Import local media files by absolute path (canvas drag-and-drop — paths
+   * come from the preload's getPathForFile). Unsupported files are skipped;
+   * only the imported assets are returned.
+   */
+  'assets:importFromPaths': {
+    input: z.object({ projectId: z.string(), paths: z.array(z.string()).min(1) }),
+    output: z.array(assetWithUrlSchema)
+  },
   'assets:update': {
     input: z.object({
       assetId: z.string(),
@@ -410,6 +464,21 @@ export const ipcContracts = {
     output: graphEdgeSchema
   },
   'edges:disconnect': { input: z.object({ edgeId: z.string() }), output: z.void() },
+  /**
+   * Reorder the connections of one input handle (§4.6): reference numbering
+   * (@Image1, @Image2…) follows edge creation order, so `edgeIds` — a
+   * permutation of the handle's current connections — becomes the new order.
+   * One journaled (undoable) step.
+   */
+  'edges:reorder': {
+    input: z.object({
+      videoId: z.string(),
+      targetNodeId: z.string(),
+      targetHandle: z.string(),
+      edgeIds: z.array(z.string()).min(1)
+    }),
+    output: z.void()
+  },
 
   'history:state': {
     input: z.object({ videoId: z.string() }),
@@ -485,6 +554,38 @@ export const ipcContracts = {
   'generations:estimateCost': {
     input: z.object({ nodeId: z.string() }),
     output: z.object({ credits: z.number().nullable() })
+  },
+  /** §4.10 phase 4 — smart-run planning in the main process: nodes that will
+   *  claim a generation (deps always reuse; targets only with reuseTargets)
+   *  + per-node credit estimates. Feeds the §4.4 cost modal. */
+  'generations:planRun': {
+    input: z.object({
+      videoId: z.string(),
+      targetNodeIds: z.array(z.string()).min(1),
+      reuseTargets: z.boolean()
+    }),
+    output: z.object({
+      rows: z.array(
+        z.object({ nodeId: z.string(), label: z.string(), credits: z.number().nullable() })
+      ),
+      total: z.number()
+    })
+  },
+  /** Runs the same plan dependency-aware (shared upstreams once, independent
+   *  branches parallel, settle-aware sequencing) and resolves when the whole
+   *  batch settled. One failing branch doesn't abort the others. */
+  'generations:runBatch': {
+    input: z.object({
+      videoId: z.string(),
+      targetNodeIds: z.array(z.string()).min(1),
+      reuseTargets: z.boolean()
+    }),
+    output: z.object({
+      succeeded: z.number().int().min(0),
+      failed: z.number().int().min(0),
+      /** nodeId → generationId for every node that claimed one. */
+      generations: z.record(z.string(), z.string())
+    })
   },
   /** Estimated credits spent + attempt count across a whole project. */
   'projects:creditsUsage': {
@@ -601,11 +702,31 @@ export const ipcContracts = {
       videoId: z.string(),
       projectId: z.string(),
       text: z.string().trim().min(1),
-      images: z.array(chatImageSchema).max(4).optional()
+      images: z.array(chatImageSchema).max(4).optional(),
+      context: appContextSchema.optional()
     }),
     output: chatStateSchema
   },
-  'chat:clear': { input: z.object({ videoId: z.string() }), output: z.void() }
+  'chat:clear': { input: z.object({ videoId: z.string() }), output: z.void() },
+  /** Persisted per-video threads for the sidebar's conversation switcher
+   *  (§4.10 phase 5) — the global thread is implicit and always first. */
+  'chat:listSessions': {
+    input: z.void(),
+    output: z.array(
+      z.object({
+        videoId: z.string(),
+        projectId: z.string(),
+        videoName: z.string().nullable(),
+        updatedAt: z.number()
+      })
+    )
+  },
+  /** Assistant capabilities for the chat input's "/" action menu — name +
+   *  first sentence of the tool description (product data, English). */
+  'chat:listTools': {
+    input: z.void(),
+    output: z.array(z.object({ name: z.string(), description: z.string() }))
+  }
 } as const satisfies Record<string, { input: z.ZodType; output: z.ZodType }>
 
 /** Main→renderer push events the preload is allowed to subscribe to. */
@@ -616,7 +737,8 @@ export const ipcEvents = [
   'event:creditsChanged',
   'event:renderProgress',
   'event:queueChanged',
-  'event:focusNode'
+  'event:focusNode',
+  'event:navigate'
 ] as const
 export type IpcEvent = (typeof ipcEvents)[number]
 
@@ -629,6 +751,11 @@ export interface GenerationsChangedPayload {
 export interface FocusNodePayload {
   videoId: string
   nodeId: string
+}
+
+/** The assistant (open_video tool) asks the app to navigate to a route. */
+export interface NavigatePayload {
+  path: string
 }
 
 /** Progress of an MP4 render. One terminal event is always sent: done or error. */

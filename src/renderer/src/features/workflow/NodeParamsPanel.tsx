@@ -2,6 +2,9 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import {
   AlertTriangle,
   Check,
+  ChevronDown,
+  ChevronUp,
+  Columns2,
   Download,
   FolderPlus,
   Loader2,
@@ -23,6 +26,7 @@ import { defaultParamsFor, getModel, videoDefaultParams } from '@shared/models'
 import { getStyle } from '@shared/styles/registry'
 import { Button } from '@renderer/components/ui/Button'
 import { Lightbox } from '@renderer/components/Lightbox'
+import { MentionMenu, useMentionMenu, type MentionItem } from '@renderer/components/ui/MentionMenu'
 import { VideoThumb } from '@renderer/components/VideoThumb'
 import { Label, Select, TextArea, TextField } from '@renderer/components/ui/Input'
 import { useConfirm } from '@renderer/components/feedback/Feedback'
@@ -290,7 +294,13 @@ function ModelNodeEditor({
     graphKeys.graph(node.videoId),
     ['generations']
   ])
+  const reorderEdgesMut = useIpcMutation('edges:reorder', [
+    graphKeys.graph(node.videoId),
+    ['history']
+  ])
   const generations = useNodeGenerations(node.id).data
+  /** Generation ids picked for the A/B compare (max 2 — the modal opens at 2). */
+  const [compareIds, setCompareIds] = useState<string[]>([])
   const graph = useWorkflowGraph()
   const connections = useMemo(() => incomingConnectionsFor(node.id, graph), [node.id, graph])
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
@@ -322,6 +332,30 @@ function ModelNodeEditor({
     queryFn: () => invoke('generations:estimateCost', { nodeId: node.id })
   })
 
+  // "@" in the prompt opens the connected-input aliases (@Image1, @Video1…) —
+  // same autocomplete as the assistant input, fed by the alias registry above.
+  const [promptCaret, setPromptCaret] = useState(0)
+  const promptValue = (params.prompt as string | undefined) ?? ''
+  const aliasItems = useMemo<MentionItem[]>(
+    () =>
+      connections
+        .filter((c) => c.alias)
+        .map((c) => ({
+          id: c.edge.id,
+          label: c.alias as string,
+          description: c.source?.label ?? c.source?.key,
+          insert: c.alias as string,
+          section: t('editor.mentionInputs')
+        })),
+    [connections, t]
+  )
+  const promptMention = useMentionMenu({
+    value: promptValue,
+    caret: promptCaret,
+    triggers: [{ char: '@' }],
+    itemsFor: () => aliasItems
+  })
+
   // Image to feed the prompt refiner: the active generation if it's an image, else the latest successful image.
   const refinerImageUrl = useMemo(() => {
     if (model?.kind !== 'image' || !generations) return undefined
@@ -346,6 +380,25 @@ function ModelNodeEditor({
     setParams((prev) => ({ ...prev, [key]: value }))
   }
 
+  /** Swap a connection with its neighbour — renumbers the @ aliases (§4.6). */
+  function moveConnection(handleKey: string, index: number, delta: -1 | 1) {
+    const conns = aliasesByHandle.get(handleKey) ?? []
+    const ids = conns.map((c) => c.edge.id)
+    const j = index + delta
+    if (j < 0 || j >= ids.length) return
+    const moved = ids[index]
+    const neighbour = ids[j]
+    if (moved === undefined || neighbour === undefined) return
+    ids[index] = neighbour
+    ids[j] = moved
+    reorderEdgesMut.mutate({
+      videoId: node.videoId,
+      targetNodeId: node.id,
+      targetHandle: handleKey,
+      edgeIds: ids
+    })
+  }
+
   function commit(key: string, value: unknown) {
     const next = { ...params, [key]: value }
     setParams(next)
@@ -366,6 +419,17 @@ function ModelNodeEditor({
       el.focus()
       const pos = start + insert.length
       el.setSelectionRange(pos, pos)
+    })
+  }
+
+  function applyPromptMention(result: { value: string; caret: number }): void {
+    setField('prompt', result.value)
+    setPromptCaret(result.caret)
+    requestAnimationFrame(() => {
+      const el = promptRef.current
+      if (!el) return
+      el.focus()
+      el.setSelectionRange(result.caret, result.caret)
     })
   }
 
@@ -457,7 +521,7 @@ function ModelNodeEditor({
                     </div>
                   ) : (
                     <ul className="mt-1 space-y-1">
-                      {conns.map((c) => (
+                      {conns.map((c, ci) => (
                         <li
                           key={c.edge.id}
                           className="flex items-center justify-between gap-2 rounded bg-neutral-800/60 px-2 py-1 text-[11px]"
@@ -473,6 +537,26 @@ function ModelNodeEditor({
                               {c.source?.label ?? c.source?.key ?? 'unknown'}
                             </span>
                           </span>
+                          {conns.length > 1 && (
+                            <span className="flex flex-shrink-0 items-center">
+                              <button
+                                onClick={() => moveConnection(input.key, ci, -1)}
+                                disabled={ci === 0 || reorderEdgesMut.isPending}
+                                className="rounded p-0.5 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100 disabled:opacity-30"
+                                title={t('editor.reorderUp')}
+                              >
+                                <ChevronUp className="h-3 w-3" />
+                              </button>
+                              <button
+                                onClick={() => moveConnection(input.key, ci, 1)}
+                                disabled={ci === conns.length - 1 || reorderEdgesMut.isPending}
+                                className="rounded p-0.5 text-neutral-400 hover:bg-neutral-700 hover:text-neutral-100 disabled:opacity-30"
+                                title={t('editor.reorderDown')}
+                              >
+                                <ChevronDown className="h-3 w-3" />
+                              </button>
+                            </span>
+                          )}
                           {c.alias && (
                             <button
                               onClick={() => insertIntoPrompt(c.alias!)}
@@ -513,14 +597,43 @@ function ModelNodeEditor({
         {model.paramFields.map((field) => (
           <div key={field.key}>
             <Label>{field.label}</Label>
-            {field.type === 'textarea' && (
+            {field.type === 'textarea' && field.key === 'prompt' && (
+              <div className="relative">
+                <TextArea
+                  ref={promptRef}
+                  value={promptValue}
+                  onChange={(e) => {
+                    setField('prompt', e.target.value)
+                    setPromptCaret(e.target.selectionStart ?? e.target.value.length)
+                  }}
+                  onSelect={(e) => setPromptCaret(e.currentTarget.selectionStart ?? 0)}
+                  onBlur={(e) => commit('prompt', e.target.value)}
+                  onKeyDown={(e) => promptMention.onKeyDown(e, applyPromptMention)}
+                  placeholder={field.description}
+                  rows={6}
+                />
+                {promptMention.open && (
+                  <div className="absolute inset-x-0 top-full z-30 mt-1">
+                    <MentionMenu
+                      items={promptMention.items}
+                      active={promptMention.active}
+                      onHover={promptMention.setActive}
+                      onPick={(item) => {
+                        const result = promptMention.select(item)
+                        if (result) applyPromptMention(result)
+                      }}
+                    />
+                  </div>
+                )}
+              </div>
+            )}
+            {field.type === 'textarea' && field.key !== 'prompt' && (
               <TextArea
-                ref={field.key === 'prompt' ? promptRef : undefined}
                 value={(params[field.key] as string | undefined) ?? ''}
                 onChange={(e) => setField(field.key, e.target.value)}
                 onBlur={(e) => commit(field.key, e.target.value)}
                 placeholder={field.description}
-                rows={field.key === 'prompt' ? 6 : 3}
+                rows={3}
               />
             )}
             {field.type === 'text' && (
@@ -618,6 +731,11 @@ function ModelNodeEditor({
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-neutral-500">
           History
         </h3>
+        {(generations?.filter((g) => g.status === 'success' && g.url).length ?? 0) >= 2 && (
+          <p className="mb-2 text-[10px] leading-snug text-neutral-500">
+            {compareIds.length === 1 ? t('editor.compare.pickSecond') : t('editor.compare.hint')}
+          </p>
+        )}
         {node.intent && (
           <div className="mb-2 rounded-md border border-accent/30 bg-accent/5 px-2.5 py-1.5 text-[11px] text-neutral-300">
             <span className="font-semibold text-accent-soft">Expected:</span> {node.intent}
@@ -640,12 +758,232 @@ function ModelNodeEditor({
                 nodeLabel={node.label ?? model.label}
                 onAskAssistant={onAskAssistant}
                 onRetry={isRunning ? undefined : onRun}
+                compared={compareIds.includes(g.id)}
+                onToggleCompare={
+                  g.status === 'success' && g.url && model.kind !== 'audio'
+                    ? () =>
+                        setCompareIds((prev) =>
+                          prev.includes(g.id)
+                            ? prev.filter((id) => id !== g.id)
+                            : [...prev.slice(-1), g.id]
+                        )
+                    : undefined
+                }
               />
             ))}
           </ul>
         )}
       </div>
+
+      {compareIds.length === 2 &&
+        (() => {
+          const [a, b] = compareIds.map((id) => generations?.find((g) => g.id === id))
+          if (!a || !b) return null
+          return (
+            <CompareModal
+              a={a}
+              b={b}
+              kind={model.kind === 'video' ? 'video' : 'image'}
+              activeId={node.selectedGenerationId}
+              onUse={(id) => {
+                selectGen.mutate({ nodeId: node.id, generationId: id })
+                setCompareIds([])
+              }}
+              onClose={() => setCompareIds([])}
+            />
+          )
+        })()}
     </PanelShell>
+  )
+}
+
+/**
+ * A/B compare of two generations (§4.6) — the core iteration gesture: two
+ * candidates side by side with synced playback (videos) or synced zoom/pan
+ * (images), and "Use this" on each side.
+ */
+function CompareModal({
+  a,
+  b,
+  kind,
+  activeId,
+  onUse,
+  onClose
+}: {
+  a: GenRow
+  b: GenRow
+  kind: 'image' | 'video'
+  activeId: string | null
+  onUse: (id: string) => void
+  onClose: () => void
+}) {
+  const { t } = useTranslation()
+  const videoRefs = [useRef<HTMLVideoElement | null>(null), useRef<HTMLVideoElement | null>(null)]
+  const scrollRefs = [useRef<HTMLDivElement | null>(null), useRef<HTMLDivElement | null>(null)]
+  const syncingScroll = useRef(false)
+  const [playing, setPlaying] = useState(false)
+  const [progress, setProgress] = useState(0)
+  const [zoom, setZoom] = useState(1)
+
+  function togglePlay() {
+    const [l, r] = videoRefs.map((ref) => ref.current)
+    if (!l || !r) return
+    if (playing) {
+      l.pause()
+      r.pause()
+      setPlaying(false)
+    } else {
+      r.currentTime = l.currentTime
+      void l.play()
+      void r.play()
+      setPlaying(true)
+    }
+  }
+
+  /** Scrub both videos to the same fraction of their own duration-capped time. */
+  function scrub(fraction: number) {
+    const [l, r] = videoRefs.map((ref) => ref.current)
+    if (!l || !r || !Number.isFinite(l.duration)) return
+    const time = fraction * l.duration
+    l.currentTime = time
+    r.currentTime = Number.isFinite(r.duration) ? Math.min(time, r.duration) : time
+    setProgress(fraction)
+  }
+
+  /** Mirror one pane's scroll onto the other (synced pan while zoomed). */
+  function syncScroll(from: number) {
+    if (syncingScroll.current) return
+    const src = scrollRefs[from]?.current
+    const dst = scrollRefs[1 - from]?.current
+    if (!src || !dst) return
+    syncingScroll.current = true
+    dst.scrollLeft = src.scrollLeft
+    dst.scrollTop = src.scrollTop
+    syncingScroll.current = false
+  }
+
+  const sides: Array<{ gen: GenRow; index: number }> = [
+    { gen: a, index: 0 },
+    { gen: b, index: 1 }
+  ]
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-6"
+      onClick={onClose}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        className="island flex max-h-[90vh] w-full max-w-5xl flex-col gap-3 overflow-hidden px-5 py-4"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between">
+          <h2 className="flex items-center gap-1.5 text-sm font-semibold text-neutral-100">
+            <Columns2 className="h-4 w-4 text-accent" /> {t('editor.compare.title')}
+          </h2>
+          <button
+            onClick={onClose}
+            className="rounded p-1 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+            title={t('common.close')}
+          >
+            <X className="h-4 w-4" />
+          </button>
+        </div>
+
+        <div className="flex min-h-0 flex-1 gap-3">
+          {sides.map(({ gen, index }) => (
+            <div key={gen.id} className="flex min-w-0 flex-1 flex-col gap-2">
+              <div className="text-[10px] text-neutral-500">
+                {new Date(gen.createdAt).toLocaleString()}
+              </div>
+              {kind === 'video' ? (
+                <video
+                  ref={videoRefs[index]}
+                  src={gen.url ?? undefined}
+                  muted
+                  playsInline
+                  onTimeUpdate={
+                    index === 0
+                      ? (e) => {
+                          const el = e.currentTarget
+                          if (Number.isFinite(el.duration) && el.duration > 0) {
+                            setProgress(el.currentTime / el.duration)
+                          }
+                        }
+                      : undefined
+                  }
+                  onEnded={() => setPlaying(false)}
+                  className="min-h-0 w-full flex-1 rounded bg-neutral-950 object-contain"
+                />
+              ) : (
+                <div
+                  ref={scrollRefs[index]}
+                  onScroll={() => syncScroll(index)}
+                  className="min-h-0 flex-1 overflow-auto rounded bg-neutral-950"
+                >
+                  <img
+                    src={gen.url ?? undefined}
+                    alt=""
+                    style={{ width: `${zoom * 100}%`, maxWidth: 'none' }}
+                  />
+                </div>
+              )}
+              {activeId === gen.id ? (
+                <span className="self-center rounded bg-accent/15 px-2 py-1 text-[11px] text-accent-soft">
+                  {t('editor.compare.active')}
+                </span>
+              ) : (
+                <Button
+                  variant="primary"
+                  size="sm"
+                  className="self-center"
+                  onClick={() => onUse(gen.id)}
+                >
+                  <Check className="h-3.5 w-3.5" /> {t('editor.compare.useThis')}
+                </Button>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {kind === 'video' ? (
+          <div className="flex items-center gap-3">
+            <Button variant="secondary" size="sm" onClick={togglePlay}>
+              {playing ? t('editor.compare.pause') : t('editor.compare.play')}
+            </Button>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.001}
+              value={progress}
+              onChange={(e) => scrub(Number(e.target.value))}
+              className="flex-1"
+              style={{ accentColor: 'var(--color-accent)' }}
+              title={t('editor.compare.scrub')}
+            />
+          </div>
+        ) : (
+          <div className="flex items-center gap-3">
+            <span className="text-[11px] text-neutral-500">{t('editor.compare.zoom')}</span>
+            <input
+              type="range"
+              min={1}
+              max={4}
+              step={0.1}
+              value={zoom}
+              onChange={(e) => setZoom(Number(e.target.value))}
+              className="flex-1"
+              style={{ accentColor: 'var(--color-accent)' }}
+            />
+            <span className="w-10 text-right font-mono text-[11px] text-neutral-400">
+              {zoom.toFixed(1)}×
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }
 
@@ -815,7 +1153,9 @@ function GenerationCard({
   defaultAssetName,
   nodeLabel,
   onAskAssistant,
-  onRetry
+  onRetry,
+  compared,
+  onToggleCompare
 }: {
   generation: GenRow
   model: ModelDefinition
@@ -826,6 +1166,10 @@ function GenerationCard({
   onAskAssistant?: (text: string) => void
   /** Re-runs the node — offered on failed generations (absent while one runs). */
   onRetry?: () => void
+  /** True while this generation is picked for the A/B compare (§4.6). */
+  compared?: boolean
+  /** Toggles this generation in the A/B compare pair (undefined = not comparable). */
+  onToggleCompare?: () => void
 }) {
   const { t } = useTranslation()
   const [saving, setSaving] = useState(false)
@@ -949,6 +1293,19 @@ function GenerationCard({
               title={t('editor.enlarge')}
             >
               <Maximize2 className="h-3 w-3" />
+            </button>
+          )}
+          {onToggleCompare && (
+            <button
+              onClick={onToggleCompare}
+              className={`flex items-center gap-1 rounded px-1.5 py-0.5 ${
+                compared
+                  ? 'bg-accent/15 text-accent-soft'
+                  : 'text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200'
+              }`}
+              title={t('editor.compare.toggle')}
+            >
+              <Columns2 className="h-3 w-3" />
             </button>
           )}
           {g.status === 'success' && g.url && (
